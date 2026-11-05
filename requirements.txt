@@ -1,0 +1,2 @@
+# 核心功能仅使用Python标准库，不需要pip安装。
+# Windows配置IANA时区时，若系统没有时区库，可执行：python -m pip install tzdata

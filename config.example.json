@@ -1,0 +1,113 @@
+{
+  "host": "127.0.0.1",
+  "port": 8028,
+  "database": "data/pc28.sqlite3",
+  "collector": {
+    "enabled": true,
+    "interval_seconds": 30,
+    "timeout_seconds": 15,
+    "latest_url": "https://www.playnow.com/services2/keno/draw/latest/100",
+    "archive_url": "https://www.playnow.com/resources/documents/downloadable-numbers/KenoCurrentYear.zip",
+    "archive_interval_hours": 24,
+    "proxy": "",
+    "source_timezone": "America/Vancouver",
+    "number_order": "require_ascending",
+    "max_response_mb": 64,
+    "max_age_seconds": 600,
+    "field_map": {
+      "records": "",
+      "id": "drawNumber",
+      "time": "drawDate",
+      "numbers": "numbers"
+    },
+    "fallback_enabled": true,
+    "fallback_url": "https://pc28.world/api/v1/draws/latest",
+    "fallback_timezone": "Asia/Shanghai",
+    "fallback_proxy": "",
+    "work_fallback_enabled": true,
+    "work_fallback_url": "https://www.pc28.work/bff/market/latest",
+    "work_fallback_proxy": "",
+    "allow_crosschecked_results": true
+  },
+  "simulation": {
+    "enabled": false,
+    "mode": "fixed",
+    "initial_balance": 100000,
+    "daily_loss_limit": 3000,
+    "max_drawdown": 15000,
+    "max_stake": 400,
+    "switch_cooldown_draws": 3,
+    "max_received_delay_seconds": 60,
+    "max_decision_age_seconds": 120,
+    "fixed": {
+      "direction": "单",
+      "threshold": 6,
+      "max_bets": 8,
+      "lookback": 30,
+      "base_cents": 10000,
+      "multiplier_hundredths": 200,
+      "max_losses": 3,
+      "kind": "imbalance",
+      "run_length": 5
+    },
+    "round_restart": "condition_reset"
+  },
+  "odds": {
+    "version": "screenshot-2026-11-01-v1",
+    "normal": 200,
+    "special_size": 200,
+    "special_parity": 200,
+    "high_stake_threshold_cents": 300100,
+    "high_stake_factor": 198,
+    "refund_winning_totals": [
+      0,
+      27
+    ],
+    "full_payout_totals": [
+      13,
+      14
+    ],
+    "min_stake_cents": 100,
+    "max_stake_cents": 2000000,
+    "max_return_per_draw_cents": 10000000
+  },
+  "research": {
+    "train_months": 3,
+    "validation_months": 1,
+    "thresholds": [
+      2,
+      4,
+      6,
+      8,
+      10,
+      12,
+      14,
+      16
+    ],
+    "max_bets": [
+      3,
+      5,
+      8,
+      13,
+      21
+    ],
+    "lookback": 30,
+    "include_reversal": true,
+    "run_lengths": [
+      3,
+      5,
+      8
+    ],
+    "min_train_bets": 1000,
+    "min_validation_bets": 300,
+    "max_validation_drawdown": 15000,
+    "minimum_validation_roi": 0.0,
+    "top_train_candidates_per_direction": 3,
+    "require_flat_profit": true
+  },
+  "monthly_auto_select": true,
+  "trend_simulation": {
+    "enabled_axes": [],
+    "initial_balance_per_strategy": 100000
+  }
+}

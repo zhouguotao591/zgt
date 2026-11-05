@@ -1,0 +1,5 @@
+const fs=require('fs'),crypto=require('crypto'),fast=require('./previous_million_fast.cjs'),{expand,canonical,candidate,rng}=require('./previous_million_continue_runner.cjs');
+const folder='data/parameter-search-previous-million-continue',m=JSON.parse(fs.readFileSync(folder+'/manifest.json')),d=JSON.parse(fs.readFileSync(folder+'/input.json')),metric=r=>[r.net,r.bets,r.wins,r.refunds,r.investment,r.roi,r.max_drawdown],rows=[];
+fast.prepare(d.one);fast.prepare(d.three);
+for(const g of m.strategies){const random=rng(g.seed+50),tuples=[[500,500,10,10,0,1,'market'],[0,0,0,0,0,1,'base'],[0,100,0,1,1,1000,'market'],[100,0,1,0,0,1,'base'],[50000,50000,1,1,2,10,'market'],[100,100,0,0,0,1,'market'],...Array.from({length:30},()=>candidate(g,random))];for(const [i,t] of tuples.entries()){const c=expand(g.base,g.kind,t),s={kind:g.kind,settings:c};rows.push([g.position,i,crypto.createHash('sha256').update(canonical(c)).digest('hex'),t,metric(fast.replay(d.one,s,d.odds)),metric(fast.replay(d.three,s,d.odds))]);}}
+fs.writeFileSync(folder+'/preflight-samples.json',JSON.stringify(rows));console.log(JSON.stringify({preflight_cases:rows.length}));

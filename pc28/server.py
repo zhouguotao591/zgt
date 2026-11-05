@@ -1,0 +1,212 @@
+import json,secrets,mimetypes,threading
+from .auth import AuthError
+from .portal import portal_html
+from pathlib import Path
+from http.server import ThreadingHTTPServer,BaseHTTPRequestHandler
+from urllib.parse import urlparse,parse_qs
+from .service import Service
+
+class LocalServer(ThreadingHTTPServer):
+ daemon_threads=True
+ def __init__(self,service):
+  self.service=service;self.token=secrets.token_urlsafe(32);super().__init__((service.cfg['host'],service.cfg['port']),Handler)
+class Handler(BaseHTTPRequestHandler):
+ def log_message(self,fmt,*args):pass
+ def send(self,code,data,ctype='application/json; charset=utf-8'):
+  if isinstance(data,(dict,list)):data=json.dumps(data,ensure_ascii=False).encode()
+  elif isinstance(data,str):data=data.encode()
+  self.send_response(code)
+  if getattr(self,'new_cookie',None):self.send_header('Set-Cookie',self.new_cookie)
+  self.send_header('Referrer-Policy','same-origin');self.send_header('X-Frame-Options','DENY');self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");self.end_headers();self.wfile.write(data)
+ def redirect(self,path):
+  self.send_response(303);self.send_header('Location',path);self.send_header('Cache-Control','no-store');self.end_headers()
+ def identity(self):return self.server.service.auth.session(self.headers.get('Cookie'),'admin' if self.admin_scope else 'member')
+ def parsed_path(self):
+  p=urlparse(self.path);self.admin_scope=p.path=='/admin' or p.path.startswith('/admin/')
+  path=p.path
+  if path.startswith('/admin/api/'):path=path[len('/admin'):]
+  elif path.startswith('/admin/assets/'):path='/'+path[len('/admin/assets/'):]
+  elif path.startswith('/admin/exports/'):path=path[len('/admin'):]
+  return p._replace(path=path)
+ def check_host(self):
+  return self.headers.get('Host') in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}')
+ def do_GET(self):
+  self.new_cookie=None
+  if not self.check_host():self.send(403,{'error':'不允许的Host'});return
+  try:
+   p=self.parsed_path();s=self.server.service
+   auth=s.auth;session,user=self.identity()
+   if p.path=='/api/session':
+    if not session:session,self.new_cookie=auth.guest_session(self.client_address[0],'admin' if self.admin_scope else 'member')
+    self.send(200,{'token':session['csrf'],'user':auth.public_user(user),'needs_setup':auth.setup_needed(),'site_name':auth.setting('site_name'),'registration_enabled':auth.setting('registration_enabled')=='true'});return
+   if p.path=='/api/auth/captcha':
+    if not session:session,self.new_cookie=auth.guest_session(self.client_address[0],'admin' if self.admin_scope else 'member')
+    self.send(200,auth.captcha(session,self.client_address[0]));return
+   if p.path=='/api/auth/me':auth.require(user);self.send(200,{'user':auth.public_user(user),'site_name':auth.setting('site_name')});return
+   if p.path=='/setup':self.redirect('/admin/setup');return
+   if p.path in ('/login','/register'):
+    next_view=parse_qs(p.query).get('next',[''])[0];next_view=next_view if next_view in ('algorithm-hall','strategy-center','home','trend','dragon','missing','stats','analysis','ai-analysis') else ''
+    self.redirect('/?auth='+p.path[1:]+('&next='+next_view if next_view else ''));return
+   if p.path in ('/admin/login','/admin/setup'):
+    if p.path=='/admin/setup' and not auth.setup_needed():self.redirect('/admin/login');return
+    if p.path=='/admin/login' and auth.setup_needed():self.redirect('/admin/setup');return
+    self.send(200,(s.root/'web/auth.html').read_bytes(),'text/html; charset=utf-8');return
+   if p.path in ('/auth.js','/auth.css'):
+    self.send(200,(s.root/'web'/p.path[1:]).read_bytes(),('application/javascript' if p.path.endswith('.js') else 'text/css')+'; charset=utf-8');return
+   public_apis={'/api/status','/api/tools','/api/draws','/api/ai-analysis'}
+   member_apis=public_apis|{'/api/algorithms','/api/algorithm-detail','/api/strategy-center'}
+   public_assets={'/app.js','/style.css','/tools.js','/tools.css','/trend-strategy.js','/account.js','/portal.css','/algorithm-hall.js','/algorithm-hall.css','/strategy-center.js','/strategy-center.css','/member-auth.js','/member-auth.css','/ai-analysis.js','/ai-analysis.css'}
+   if p.path=='/admin':
+    if not user:self.redirect('/admin/setup' if auth.setup_needed() else '/admin/login');return
+    auth.require(user,True);self.send(200,portal_html(s,True,user),'text/html; charset=utf-8');return
+   if self.admin_scope:auth.require(user,True)
+   elif p.path.startswith('/api/'):
+    if p.path not in member_apis:raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
+    if p.path not in public_apis:auth.require(user)
+   elif p.path.startswith('/exports/') or p.path in ('/strategies.js','/history-backtest.js','/admin.js','/profit-curve.js','/robot.js','/ai-admin.js'):raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
+   elif p.path!='/' and p.path not in public_assets:auth.require(user)
+   if p.path=='/':self.send(200,portal_html(s,False,user),'text/html; charset=utf-8');return
+   if p.path.startswith('/api/admin/'):
+    from .admin import get
+    self.send(200,get(s,p.path.split('/')[-1],{k:v[0] for k,v in parse_qs(p.query).items()}));return
+   if p.path=='/api/simulation-summary':
+    from .strategies import catalog
+    with s.lock:rows=catalog(s.db,s.cfg)['strategies']
+    metrics={'bets','wins','refunds','win_rate','profitable_win_rate','net','investment','roi','max_drawdown','pending_stake','initial_balance','balance','curve'}
+    self.send(200,{'strategies':[{**{k:r[k] for k in ('id','name','enabled')},'stats':{k:v for k,v in r['stats'].items() if k in metrics}} for r in rows if r['enabled']]});return
+   if p.path=='/api/status':
+    result=s.status()
+    if not self.admin_scope:
+     for key in ('orders','decisions','tasks','jobs','selections','switches','rounds'):result[key]=[]
+     result['account']={}
+     if result.get('collection_health'):result['collection_health']={'status':result['collection_health']['status'],'details':{'attempts':[{'error':'上游暂未返回有效数据，程序将自动重试'}]}}
+    self.send(200,result);return
+   if p.path=='/api/ai-analysis':
+    window=parse_qs(p.query).get('window',['20'])[0];self.send(200,s.ai.public(int(window) if window in ('20','50','100') else 20));return
+   if p.path=='/api/strategy-center':
+    from .strategy_center import listing
+    self.send(200,listing(s));return
+   if p.path=='/api/algorithms':self.send(200,s.algorithm_hall.listing(user['id']));return
+   if p.path=='/api/algorithm-detail':
+    q=parse_qs(p.query);self.send(200,s.algorithm_hall.detail(q.get('id',[''])[0],q.get('page',['1'])[0],q.get('page_size',['20'])[0]));return
+   if p.path=='/api/tools':self.send(200,s.tools.run({k:v[0] for k,v in parse_qs(p.query).items()}));return
+   if p.path=='/api/strategy-profit-curve':
+    from .profit_curve import result
+    q=parse_qs(p.query);include=q.get('include_backfill',['1'])[0]
+    if include not in ('0','1'):raise ValueError('历史补单筛选无效')
+    with s.lock:data=result(s.db,q.get('id',[''])[0],include=='1')
+    self.send(200,data);return
+   if p.path=='/api/strategy-defaults':
+    from .follow_strategy import defaults
+    q=parse_qs(p.query);kind=q.get('kind',['hourly'])[0];axis=q.get('axis',['size'])[0]
+    if kind not in ('hourly','majority','previous') or axis not in ('size','parity'):raise ValueError('策略类型或维度无效')
+    self.send(200,defaults(s.cfg,kind,axis));return
+   if p.path=='/api/history-backtests':
+    from .history_backtest import metadata
+    with s.lock:result=metadata(s)
+    self.send(200,result);return
+   if p.path=='/api/history-backtest-result':
+    from .history_backtest import result_page
+    q=parse_qs(p.query);self.send(200,result_page(s.db,q.get('id',[''])[0],q.get('page',['1'])[0],q.get('page_size',['20'])[0],q.get('interval',['1h'])[0]));return
+   if p.path=='/api/history-backtest-task':
+    q=parse_qs(p.query);task=s.tasks.get(q.get('id',[''])[0])
+    if not task or task['kind']!='history_backtest':raise ValueError('回测任务不存在，请从已保存结果中查看')
+    self.send(200,dict(task));return
+   if p.path=='/api/strategies':
+    from .strategies import catalog
+    with s.lock:result=catalog(s.db,s.cfg,dict(s.tasks))
+    self.send(200,result);return
+   if p.path=='/api/strategy-orders':
+    from .strategies import order_page
+    q=parse_qs(p.query)
+    with s.lock:result=order_page(s.db,s.cfg,q.get('strategy',['all'])[0],q.get('page',['1'])[0],q.get('page_size',['20'])[0],q.get('active',['1'])==['1'])
+    if not self.admin_scope:
+     for order in result['orders']:
+      order.pop('strategy_json',None);order.pop('reason',None)
+    self.send(200,result);return
+   if p.path=='/api/trend-orders':
+    from .trend_strategy import order_page
+    q=parse_qs(p.query);self.send(200,order_page(s.db,q.get('strategy',['all'])[0],q.get('page',['1'])[0],q.get('page_size',['20'])[0],s.cfg['trend_simulation']['enabled_axes'] if q.get('active')==['1'] else None));return
+   if p.path=='/api/trend-status':
+    from .trend_strategy import status
+    self.send(200,status(s.db,s.cfg));return
+   if p.path=='/api/config':self.send(200,s.cfg);return
+   if p.path=='/api/draws':
+    q=parse_qs(p.query);limit=max(1,min(1000,int(q.get('limit',['100'])[0])));before=int(q.get('before',['9223372036854775807'])[0]);self.send(200,[s.display_draw(r) for r in s.db.query('SELECT * FROM draws WHERE id<? ORDER BY id DESC LIMIT ?',(before,limit))]);return
+   if p.path=='/api/conflicts':self.send(200,s.db.query('SELECT * FROM conflicts WHERE resolved=0 ORDER BY id DESC LIMIT 100'));return
+   if p.path=='/api/equity':self.send(200,s.db.query("SELECT target_draw,pnl,equity FROM (SELECT id,target_draw,pnl,SUM(pnl) OVER(ORDER BY id)/100.0 equity FROM orders WHERE status='settled') ORDER BY id DESC LIMIT 500"));return
+   if p.path.startswith('/exports/'):
+    name=p.path[len('/exports/'):]
+    if Path(name).name!=name or not name or '..' in name:raise ValueError('文件路径错误')
+    f=s.root/'data/exports'/name
+   else:
+    names={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/tools.js':'tools.js','/tools.css':'tools.css','/trend-strategy.js':'trend-strategy.js','/strategies.js':'strategies.js','/history-backtest.js':'history-backtest.js','/admin.js':'admin.js','/account.js':'account.js','/portal.css':'portal.css','/algorithm-hall.js':'algorithm-hall.js','/algorithm-hall.css':'algorithm-hall.css','/member-auth.js':'member-auth.js','/member-auth.css':'member-auth.css','/profit-curve.js':'profit-curve.js','/robot.js':'robot.js','/ai-analysis.js':'ai-analysis.js','/ai-analysis.css':'ai-analysis.css','/ai-admin.js':'ai-admin.js','/strategy-center.js':'strategy-center.js','/strategy-center.css':'strategy-center.css'}
+    if p.path not in names:self.send(404,{'error':'不存在'});return
+    f=s.root/'web'/names[p.path]
+   if not f.is_file():self.send(404,{'error':'文件不存在'});return
+   self.send(200,f.read_bytes(),(mimetypes.guess_type(f.name)[0] or 'application/octet-stream')+'; charset=utf-8')
+  except AuthError as e:self.send(e.status,{'error':str(e),'code':e.code})
+  except (ValueError,KeyError) as e:self.send(400,{'error':str(e)})
+  except Exception as e:self.send(500,{'error':str(e)})
+ def do_POST(self):
+  self.new_cookie=None
+  port=self.server.server_port;origins={f'http://127.0.0.1:{port}',f'http://localhost:{port}'}
+  if not self.check_host() or self.headers.get('Origin') not in origins|{None}:
+   self.send(403,{'error':'本地请求来源校验失败，请使用本机管理页面','code':'forbidden_origin'});return
+  if self.headers.get('Content-Type','').split(';')[0]!='application/json':self.send(415,{'error':'仅接受application/json'});return
+  try:
+   length=int(self.headers.get('Content-Length','0'))
+   if length<0 or length>1024*1024:raise ValueError('请求过大')
+   body=json.loads(self.rfile.read(length) or b'{}');s=self.server.service;p=self.parsed_path().path
+   if not isinstance(body,dict):raise ValueError('请求必须为对象')
+   auth=s.auth;session,user=self.identity();ip=self.client_address[0]
+   local_control=p=='/api/shutdown' and auth.control_allowed(self.headers.get('X-PC28-Control'))
+   if not local_control:
+    auth.csrf(session,self.headers.get('X-PC28-Token'))
+    if p not in ('/api/auth/login','/api/auth/register','/api/auth/setup'):
+     if self.admin_scope:auth.require(user,True)
+     else:
+      auth.require(user)
+      if p not in ('/api/auth/logout','/api/auth/password','/api/algorithm-favorite'):raise AuthError('管理操作必须在独立后台执行',403,'admin_portal_required')
+   if p in ('/api/auth/login','/api/auth/register','/api/auth/setup'):
+    result,self.new_cookie=auth.authenticate(p.split('/')[-1],session,body,ip);self.send(200,result);return
+   if p=='/api/algorithm-favorite':self.send(200,s.algorithm_hall.favorite(user['id'],body));return
+   if p=='/api/auth/logout':self.new_cookie=auth.logout(session,user,ip);self.send(200,{'ok':True});return
+   if p=='/api/auth/password':self.send(200,auth.change_password(user,body,ip));return
+   if p.startswith('/api/admin/'):
+    from .admin import post
+    self.send(200,post(s,p.split('/')[-1],body,user,ip));return
+   if user:
+    with s.db.tx() as c:auth.audit(c,user['id'],'admin_request',p,ip,{'fields':list(body)})
+   if p=='/api/shutdown':
+    s.stop.set();self.send(200,{'ok':True});threading.Thread(target=self.server.shutdown,daemon=True).start();return
+   if p=='/api/resolve-conflict':
+    with s.lock:result=s.db.resolve_conflict(int(body['id']),body['choice'],body['reason'])
+    self.send(200,result);return
+   if p=='/api/strategy-save':
+    from .custom_strategy import save
+    self.send(200,save(s,body));return
+   if p=='/api/strategy-delete':
+    from .strategy_delete import delete
+    self.send(200,delete(s,body));return
+   if p=='/api/strategy-control':
+    from .strategies import control
+    self.send(200,control(s,body));return
+   if p=='/api/trend-control':
+    import copy
+    with s.lock:
+     config=copy.deepcopy(s.cfg);config['trend_simulation']['enabled_axes']=body['enabled_axes'];s.update_config(config)
+    self.send(200,{'ok':True});return
+   if p=='/api/config':s.update_config(body);self.send(200,{'ok':True});return
+   if p=='/api/pause':s.pause(bool(body['paused']));self.send(200,{'ok':True});return
+   if p=='/api/task':self.send(202,{'task_id':s.submit(body['kind'],body.get('args',{}))});return
+   self.send(404,{'error':'不存在'})
+  except AuthError as e:self.send(e.status,{'error':str(e),'code':e.code})
+  except (ValueError,KeyError,TypeError) as e:self.send(400,{'error':str(e)})
+  except Exception as e:self.send(500,{'error':str(e)})
+
+def serve(root):
+ s=Service(root);server=LocalServer(s);s.start();print(f'PC28本地模拟平台 http://127.0.0.1:{server.server_port}',flush=True)
+ try:server.serve_forever(poll_interval=.5)
+ except KeyboardInterrupt:pass
+ finally:s.stop.set();server.server_close()

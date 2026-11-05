@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+config.json
+
+# Local credentials, runtime artifacts and machine configuration
+.env
+.env.*
+!.env.example
+*.dpapi
+*.sqlite
+*.sqlite3
+*.db
+*.log
+*.pid
+*.bak
+node_modules/
+.pytest_cache/
+.coverage
+htmlcov/
