@@ -1,0 +1,16 @@
+'use strict';
+window.pc28IncomeChart=function(bars,candleInterval,emptyMessage,allowOrderGrouping=false){
+const timeNames={'1h':'1小时','4h':'4小时','1d':'日线'};
+const orderNames={'1o':'单笔订单','20o':'20笔订单','50o':'50笔订单','100o':'100笔订单'};
+const names={...timeNames,...orderNames};
+const byOrder=candleInterval in orderNames;
+const buttons=options=>Object.entries(options).map(([k,v])=>`<button type="button" data-k-interval="${k}" class="${k===candleInterval?'selected':'secondary'}" aria-pressed="${k===candleInterval}">${v}</button>`).join('');
+const orderControls=allowOrderGrouping?`<div class="hb-k-periods" role="group" aria-label="按订单聚合">${buttons(orderNames)}</div>`:'';
+const note=byOrder?'按结算顺序连续分组 · 末组不足指定笔数也显示':'北京时间聚合 · 无成交时段收益持平';
+const header=`<div class="hb-k-head"><h3>累计净收益K线（U）</h3><div class="hb-k-periods" role="group" aria-label="按时间聚合">${buttons(timeNames)}</div>${orderControls}</div><p class="muted">${note} · 红涨绿跌 · 横向滚动查看历史 · 鼠标悬停查看开高低收</p>`;
+const orderLabel=b=>b.first_order===b.last_order?'第'+b.first_order+'笔':b.first_order+'–'+b.last_order+'笔';
+const hoverTime=b=>byOrder?orderLabel(b)+' · '+beijingTime(b.time)+(b.end_time!==b.time?' 至 '+beijingTime(b.end_time):''):beijingTime(b.time);
+const axisLabel=b=>byOrder?orderLabel(b):beijingTime(b.time).slice(0,candleInterval==='1d'?10:16);
+if(!bars.length)return header+'<div class="empty">'+esc(emptyMessage)+'</div>';
+let low=Math.min(0,...bars.map(b=>b.low)),high=Math.max(0,...bars.map(b=>b.high)),span=high-low||1;low-=span*.06;high+=span*.06;const W=Math.max(960,bars.length*11+110),L=80,R=W-100,T=20,B=310,x=i=>L+(i+.5)*(R-L)/bars.length,y=v=>B-(v-low)/(high-low)*(B-T),body=Math.max(2,Math.min(9,(R-L)/bars.length*.7));
+return header+`<div class="hb-k-frame"><svg class="hb-k-axis" width="90" height="320" aria-hidden="true">${Array.from({length:5},(_,i)=>{const v=low+(high-low)*i/4;return `<text x="10" y="${y(v)+4}" fill="#71839a" font-size="11">${num(v)}</text>`;}).join('')}</svg><div class="hb-k-scroll"><svg width="${W}" height="360" viewBox="0 0 ${W} 360" role="img" aria-label="${names[candleInterval]}累计净收益K线">${Array.from({length:5},(_,i)=>{const v=low+(high-low)*i/4;return `<line x1="${L}" x2="${R}" y1="${y(v)}" y2="${y(v)}" stroke="#e4ebf4"/><text x="6" y="${y(v)+4}" fill="#71839a" font-size="11">${num(v)}</text>`;}).join('')}<line x1="${L}" x2="${R}" y1="${y(0)}" y2="${y(0)}" stroke="#8295ab" stroke-dasharray="4 4"/>${bars.map((b,i)=>{const color=b.close>b.open?'#df5263':b.close<b.open?'#159478':'#8b9aae',xx=x(i),top=Math.min(y(b.open),y(b.close)),h=Math.max(1,Math.abs(y(b.open)-y(b.close)));return `<g><title>${esc(hoverTime(b))} · 开 ${num(b.open)} · 高 ${num(b.high)} · 低 ${num(b.low)} · 收 ${num(b.close)} · ${b.orders}笔</title><line x1="${xx}" x2="${xx}" y1="${y(b.high)}" y2="${y(b.low)}" stroke="${color}" stroke-width="1.4"/><rect x="${xx-body/2}" y="${top}" width="${body}" height="${h}" fill="${color}"/></g>`;}).join('')}${bars.map((b,i)=>({b,i})).filter(({i})=>i%Math.max(1,Math.ceil(bars.length/Math.max(3,Math.floor(W/140))))===0).map(({b,i})=>`<text x="${x(i)}" y="340" text-anchor="middle" fill="#71839a" font-size="10">${esc(axisLabel(b))}</text>`).join('')}</svg></div></div><p class="muted">${bars.length}根K线 · 最后收盘累计收益 ${cash(bars.at(-1).close)}U；K线使用全部已结算订单逐笔聚合，不使用抽样曲线。</p>`;};

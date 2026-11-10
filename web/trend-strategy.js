@@ -1,0 +1,15 @@
+'use strict';
+(() => {if(document.body.dataset.authenticated==='0')return;
+ const el=id=>document.getElementById(id),E=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const num=x=>x==null?'—':Number(x).toLocaleString('zh-CN',{maximumFractionDigits:2}),pct=x=>x==null?'—':(x*100).toFixed(2)+'%',names={legacy:'三十期买单反转策略',parity:'单双策略',size:'大小策略'};
+ let loading=false,orderPage=1,orderPages=1,orderRequest=0;
+ const moneyHtml=x=>`<span class="${x<0?'negative':'positive'}">${x>0?'+':''}${num(x)}</span>`;
+ async function renderOrders(){const request=++orderRequest;try{const d=await api('/api/strategy-orders?'+new URLSearchParams({strategy:el('ts-order-filter').value,page:orderPage,page_size:el('ts-order-size').value,active:'1'}));if(request!==orderRequest)return;orderPage=d.page;orderPages=d.pages;el('ts-order-page').textContent=`第 ${d.page} / ${d.pages} 页 · 共 ${num(d.total)} 条`;for(const k of ['first','prev'])el('ts-order-'+k).disabled=d.page<=1;for(const k of ['next','last'])el('ts-order-'+k).disabled=d.page>=d.pages;Object.assign(names,d.strategy_names);const selected=el('ts-order-filter').value;el('ts-order-filter').innerHTML='<option value="all">全部</option>'+Object.entries(d.strategy_names).map(([k,v])=>`<option value="${E(k)}">${E(v)}</option>`).join('');el('ts-order-filter').value=selected;for(const option of el('ts-order-filter').options)option.disabled=option.value!=='all'&&!d.enabled_strategies.includes(option.value);if(el('ts-order-filter').selectedOptions[0].disabled){el('ts-order-filter').value='all';orderPage=1;renderOrders();return;}const rows=d.orders;table('ts-orders',[['策略',r=>E(names[r.strategy])],['目标期号','target_draw'],['方向','direction'],['走势占比',r=>r.strategy==='legacy'?'—':pct(r.ratio)],['金额',r=>num(r.stake/100)],['轮回 / 第几单',r=>`${r.cycle??'—'} / ${r.step??'—'}${r.max_bets?'（上限'+r.max_bets+'）':''}`],['状态',r=>`${r.status==='pending'?'待开奖':r.outcome==='refund'?'退本金':r.hit?'命中':'未命中'}${r.backfilled?'<small class="backfill-label">历史补单</small>':''}`],['净收益',r=>r.pnl==null?'—':moneyHtml(r.pnl/100)],['数据截止期号','cutoff_draw']],rows);}catch(e){if(request===orderRequest)toast(e.message);}}
+ async function refresh(){if(loading||(window.pc28Access&&!window.pc28Access.can('page.simulation')))return;loading=true;try{await renderOrders();}finally{loading=false;}}
+ el('ts-order-filter').onchange=el('ts-order-size').onchange=()=>{orderPage=1;renderOrders();};for(const k of ['first','prev','next','last'])el('ts-order-'+k).onclick=()=>{orderPage=({first:1,prev:Math.max(1,orderPage-1),next:Math.min(orderPages,orderPage+1),last:orderPages})[k];renderOrders();};
+ function onStatus(){if(el('simulation').classList.contains('active'))refresh();}
+ function syncSelection(c){window.pc28Strategies?.refresh();}
+ window.pc28Trend={status:onStatus,selection:syncSelection};document.querySelector('[data-tab="simulation"]').addEventListener('click',()=>{loadConfig().catch(e=>toast(e.message));refresh();});refresh();
+})();
+
+window.pc28TrendReady=true;

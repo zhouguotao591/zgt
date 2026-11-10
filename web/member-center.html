@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>会员中心 · PC28</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/tools.css">
+  <link rel="stylesheet" href="/member-auth.css">
+  <link rel="stylesheet" href="/member-center.css">
+  <script src="/member-center.js" defer></script>
+  <!-- auth-script -->
+</head>
+<body data-member-center="1" data-authenticated="0">
+  <main class="mc-shell">
+    <header class="mc-header">
+      <div class="mc-title"><a href="/" aria-label="返回 PC28 首页">28</a><h1>会员中心</h1></div>
+      <span id="mc-user"></span>
+      <div class="mc-note"><span>记账口径</span><p>按成功接收的跟单信号、本站开奖和订单赔率记账。</p><small>北京时间</small></div>
+    </header>
+    <section id="mc-login" class="panel">
+      <h2>会员登录</h2>
+      <p>使用会员账号查看自己的跟单记录与收益。</p>
+      <button id="mc-open-login" type="button" data-open-auth="login">登录会员中心</button>
+    </section>
+    <p id="mc-error" role="status"></p>
+    <button id="mc-retry" type="button" class="secondary" hidden>重试</button>
+    <div id="mc-private" hidden>
+      <nav class="mc-nav" aria-label="会员中心">
+        <button type="button" data-mc-view="home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 10 9-7 9 7v10h-6v-6H9v6H3z"/></svg><span>首页</span></button>
+        <button type="button" data-mc-view="orders"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6m-6 4h6m-6 4h4"/></svg><span>订单</span></button>
+        <button type="button" data-mc-view="me"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><span>我的</span></button>
+      </nav>
+      <section id="mc-home">
+        <article class="panel"><h2>资金与收益</h2><p id="mc-updated" class="muted"></p><div id="mc-total" class="mc-metrics"></div></article>
+        <article class="panel"><h2>周期收益</h2><div id="mc-periods" class="mc-periods"></div></article>
+        <article class="panel"><h2>下单账号</h2><div id="mc-accounts" class="mc-grid"></div></article>
+      </section>
+      <section id="mc-orders" class="panel" hidden>
+        <h2>订单管理</h2>
+        <form id="mc-filters" class="mc-filters">
+          <label>时间口径<input type="text" value="开奖时间" readonly></label>
+          <label>开奖开始日期<input id="mc-start" type="date"></label>
+          <label>开奖结束日期<input id="mc-end" type="date"></label>
+          <label>状态<select id="mc-status"><option value="">全部</option><option value="pending">待开奖</option><option value="settled">已记账</option><option value="void">已作废</option></select></label>
+          <div class="mc-filter-field"><span id="mc-accounts-label">下单账号</span><details><summary aria-labelledby="mc-accounts-label mc-accounts-selection" id="mc-accounts-selection">全部账号</summary><div id="mc-filter-accounts" class="mc-options"></div></details></div>
+          <div class="mc-filter-field"><span id="mc-bots-label">机器人</span><details><summary aria-labelledby="mc-bots-label mc-bots-selection" id="mc-bots-selection">全部机器人</summary><div id="mc-filter-bots" class="mc-options"></div></details></div>
+          <div class="mc-controls mc-filter-actions"><button>筛选</button><button type="reset" class="secondary">重置</button></div>
+        </form>
+        <div id="mc-order-summary" class="mc-metrics"></div>
+        <div id="mc-order-list"></div>
+        <div class="mc-pagination">
+          <label>每页 <select id="mc-size"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></label>
+          <button type="button" id="mc-first" class="secondary">首页</button>
+          <button type="button" id="mc-prev" class="secondary">上一页</button>
+          <span id="mc-page" aria-live="polite"></span>
+          <button type="button" id="mc-next" class="secondary">下一页</button>
+          <button type="button" id="mc-last" class="secondary">尾页</button>
+        </div>
+      </section>
+      <section id="mc-me" class="panel" hidden>
+        <h2>我的账号</h2><p id="mc-identity"></p>
+        <div class="mc-controls"><button id="account-password" type="button" class="secondary">修改密码</button><button id="account-logout" type="button" class="secondary">退出</button></div>
+      </section>
+      <dialog id="mc-detail" class="strategy-dialog" aria-labelledby="mc-detail-title">
+        <div class="strategy-dialog-head"><h2 id="mc-detail-title">订单详情</h2><form method="dialog"><button type="submit" class="secondary">关闭</button></form></div>
+        <div id="mc-detail-body" class="mc-detail-body" aria-live="polite"></div>
+      </dialog>
+    </div>
+  </main>
+  <!-- dialogs -->
+</body>
+</html>

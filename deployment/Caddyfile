@@ -1,0 +1,13 @@
+{
+	admin 127.0.0.1:2019
+	storage file_system {
+		root ./data/caddy
+	}
+}
+www.pc28-6688.com {
+	reverse_proxy 127.0.0.1:8028
+}
+admin.pc28-6688.com {
+	redir / /admin/setup 302
+	reverse_proxy 127.0.0.1:8028
+}

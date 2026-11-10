@@ -1,0 +1,2 @@
+# AI probability training (the rest of the site continues without this dependency).
+numpy>=1.24,<3

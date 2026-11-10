@@ -1,0 +1,67 @@
+.ra-tabs{display:flex;gap:22px;border-bottom:1px solid #dce5f1;margin:16px 0}.ra-tabs button{border:0;border-radius:0;background:transparent;color:#71839a;padding:12px 0}.ra-tabs [aria-selected=true]{color:#1768ce;border-bottom:2px solid #1768ce}.ra-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.ra-form-grid label{display:grid;gap:6px;min-width:0}.ra-wide{grid-column:1/-1}.ra-bot-card{padding:15px;border:1px solid #dce5f1;border-radius:10px;margin-top:12px}.ra-detail-box{padding:18px;background:#f4f7fb;border-radius:12px;margin:16px 0}.ra-sub-row{display:grid;grid-template-columns:minmax(130px,1.4fr) minmax(115px,1fr) 115px 100px;gap:9px;align-items:center;border-bottom:1px solid #e5ebf3;padding:12px 0}.ra-sub-row label{display:flex;gap:8px;align-items:center}.ra-sub-row input:not([type=checkbox]),.ra-sub-row select{width:100%;min-width:0}.ra-steps{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px;color:#71839a}.ra-steps .active{color:#1768ce;font-weight:600}.ra-dialog-footer{padding:15px 22px;border-top:1px solid #dce5f1;background:white;position:sticky;bottom:0;z-index:2}#ra-dialog{max-width:850px;width:calc(100% - 24px);max-height:90vh;padding:0;overflow:auto}#ra-dialog-error{white-space:pre-line}#ra-detail small,#ra-table small{display:block}.ra-summary{padding:13px;background:#eaf2ff;border-radius:8px;margin-top:14px;white-space:pre-line}.ra-inline{display:flex;gap:12px;align-items:center;flex-wrap:wrap}#ra-selected{color:#71839a}.ra-batch-message{font-size:22px;padding:15px;background:#f3f6fa;overflow-wrap:anywhere;border-radius:8px}@media(max-width:650px){.ra-form-grid{grid-template-columns:1fr}.ra-sub-row{grid-template-columns:1fr 1fr}.ra-sub-row>label:first-child{grid-column:1/-1}.ra-tabs{gap:15px}.ra-dialog-footer{padding:12px}.ra-bot-card{padding:10px}}
+#admin-robot .panel,#ra-detail,#ra-table{min-width:0;max-width:100%}#ra-filter label{min-width:0;max-width:100%;display:flex;flex-wrap:wrap;gap:6px}#ra-filter input,#ra-filter select{max-width:100%;min-width:0}.ra-detail-box .section-head{flex-wrap:wrap;gap:10px}.ra-detail-box .section-head>div{min-width:0;max-width:100%}.ra-detail-box .admin-actions{flex-wrap:wrap}.ra-detail-box h3,.ra-detail-box p,.ra-detail-box small{overflow-wrap:anywhere}@media(max-width:650px){#ra-filter{align-items:stretch}#ra-filter label{width:100%}#ra-filter label input,#ra-filter label select{width:100%}.ra-detail-box{padding:12px}}
+#admin-robot .toolbar{flex-wrap:wrap;min-width:0}#admin-robot .toolbar label{max-width:100%;min-width:0}
+.ra-tabs{flex-wrap:wrap;row-gap:0}.ra-tabs button{white-space:normal}
+.robot-record-layout {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: clamp(240px, 68dvh, 760px);
+}
+#admin-robot .robot-record-layout #robot-records {
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid #dce5ef;
+  border-radius: 8px;
+}
+.robot-record-layout #robot-records table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.robot-record-layout #robot-records :is(th, td) {
+  white-space: normal;
+  min-width: 0;
+  max-width: none;
+}
+.robot-record-layout #robot-records th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #f6f8fb;
+}
+.robot-record-layout #robot-records :is(th, td):first-child {
+  position: sticky;
+  left: 0;
+  width: 108px;
+  max-width: 108px;
+  box-shadow: 3px 0 6px #17324d14;
+}
+.robot-record-layout #robot-records :is(th, td):last-child {
+  position: sticky;
+  right: 0;
+  width: 98px;
+  box-shadow: -3px 0 6px #17324d14;
+}
+.robot-record-layout #robot-records td:is(:first-child, :last-child) {
+  z-index: 2;
+  background: #fff;
+}
+.robot-record-layout #robot-records th:is(:first-child, :last-child) {
+  z-index: 4;
+}
+#admin-robot .robot-record-layout .pagination {
+  margin-top: 0;
+  padding-top: 10px;
+  background: #fff;
+}
+.robot-record-actions {
+  margin-top: 4px;
+}
+.robot-record-actions summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #52687d;
+  font-size: 12px;
+}

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+ <system.webServer>
+  <rewrite><rules>
+   <rule name="Deny-private-paths" stopProcessing="true"><match url="^(data|pc28|tests|scripts|deployment|\.venv|\.git)(/|$)|^(config.*\.json|.*\.sqlite3?|.*\.dpapi)$" ignoreCase="true"/><action type="CustomResponse" statusCode="404" statusReason="Not Found" statusDescription="Not Found"/></rule>
+   <rule name="HTTPS" stopProcessing="true"><match url="(.*)"/><conditions><add input="{HTTPS}" pattern="off"/></conditions><action type="Redirect" url="https://{HTTP_HOST}/{R:1}" redirectType="Permanent"/></rule>
+   <rule name="PC28 proxy" stopProcessing="true"><match url="(.*)"/><action type="Rewrite" url="http://127.0.0.1:8028/{R:1}" appendQueryString="true"/></rule>
+  </rules></rewrite>
+  <directoryBrowse enabled="false"/>
+  <httpProtocol><customHeaders><add name="Strict-Transport-Security" value="max-age=31536000"/></customHeaders></httpProtocol>
+ </system.webServer>
+</configuration>

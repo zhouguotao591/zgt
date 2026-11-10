@@ -1,0 +1,15 @@
+/config.json
+/data/
+/.venv/
+/deployment/caddy/
+/RELEASE-MANIFEST.json
+/RELEASE-VERIFICATION.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+*.log
+*.sqlite*
+*.db
+*.asar
