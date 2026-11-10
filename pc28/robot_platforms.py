@@ -6,6 +6,15 @@ import urllib.request
 from .bot_secret import SecretStore
 from .model import utcnow
 
+def execution_callback_origin(config, endpoint):
+ deployment=config.get('deployment',{})
+ if deployment.get('public_origin'):return deployment['public_origin']
+ port=config.get('port')
+ if (config.get('host')=='127.0.0.1' and not deployment.get('admin_origin')
+     and urlsplit(endpoint).hostname=='127.0.0.1' and type(port) is int and 1<=port<=65535):
+  return f'http://127.0.0.1:{port}'
+ raise ValueError('请配置公网 HTTPS 回调域名，或使用同机 127.0.0.1 接收工具')
+
 class Platforms:
  def init_platforms(self):
   with self.db.tx() as c:
@@ -40,6 +49,7 @@ class Platforms:
   previous=old_rows[0] if old_rows else {}
   required=body.get('execution_required',bool(previous.get('execution_required')))
   if type(required) is not bool:raise ValueError('执行回调开关无效')
+  if required:execution_callback_origin(self.service.cfg,endpoint)
   if required and enabled and (not previous.get('enabled') or not previous.get('execution_required') or endpoint!=previous.get('endpoint')):
    self.require_execution_receiver(endpoint)
   with self.service.lock,self.db.tx() as c:
@@ -48,7 +58,6 @@ class Platforms:
    if old and 'version' in body and body['version']!=old['version']:
     from .robot_accounts import conflict
     conflict()
-   if required and not self.service.cfg.get('deployment',{}).get('public_origin'):raise ValueError('请先配置公网 HTTPS 回调域名')
    if not key:
     key=c.execute('INSERT INTO robot_platforms(name,endpoint,enabled,created,updated) VALUES(?,?,0,?,?)',(name.strip(),endpoint,utcnow(),utcnow())).lastrowid
    secret=self.platform_secret(key)
@@ -65,6 +74,6 @@ class Platforms:
    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
    with opener.open(endpoint.rsplit('/',1)[0]+'/health',timeout=5) as response:
     data=json.loads(response.read(4096))
-    if isinstance(data,dict) and data.get('order_execution_callbacks')==1:return
+    if isinstance(data,dict) and data.get('order_batch_callbacks')==1:return
   except (OSError,ValueError):pass
-  raise ValueError('接收工具尚未声明支持逐笔执行确认，请先升级接收工具')
+  raise ValueError('接收工具尚未声明支持合并执行回调，请先升级接收工具')

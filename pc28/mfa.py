@@ -66,6 +66,16 @@ class MFA:
         self.auth = auth
         self.key_path = auth.root / 'data/private/mfa.key'
 
+    def is_required(self, scope, user):
+        cfg = self.auth.service.cfg
+        deployment = cfg.get('deployment', {})
+        if (scope == 'admin' and user['role'] == 'admin' and user['username'] == 'admin'
+                and cfg.get('host') == '127.0.0.1'
+                and not any(deployment.get(key) for key in ('public_origin', 'admin_origin'))
+                and (self.key_path.parent / 'local-admin-mfa-off').is_file()):
+            return False
+        return required(scope, user)
+
     def key_init(self):
         self.key_path.parent.mkdir(parents=True, exist_ok=True)
         with os.fdopen(os.open(self.key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as f:
@@ -141,7 +151,7 @@ class MFA:
 
     def status(self, scope, user):
         return {
-            'required': bool(required(scope, user)),
+            'required': bool(self.is_required(scope, user)),
             'bound': bool(self.auth.db.query('SELECT 1 FROM web_totp_credentials WHERE user_id=?', (user['id'],))),
         }
 

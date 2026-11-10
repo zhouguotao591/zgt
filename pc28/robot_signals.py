@@ -395,15 +395,21 @@ class RobotSignals(Accounts,Platforms):
      return True
     wire.update(deadline)
     c.execute('UPDATE robot_batches SET request=? WHERE id=?',(json.dumps(wire,ensure_ascii=False),batch_id))
+    required=bool(platform.get('execution_required') or 'execution_callback' in wire)
+    callback_url=''
+    if required:
+     from .robot_platforms import execution_callback_origin
+     try:callback_url=execution_callback_origin(self.service.cfg,platform['endpoint'])+'/api/receiver/order-status'
+     except ValueError as error:
+      c.execute("UPDATE robot_outbox SET status='cancelled',last_error=?,finished=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",
+                (str(error),utcnow(),batch_id));return True
     if row.get('bot_id') is not None:
      risk_reason=robot_risk.admit(c,row['bot_id'],members)
      if risk_reason:
       c.execute("""UPDATE robot_outbox SET status='cancelled',last_error=?,finished=?
                    WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)""",
                 (risk_reason,utcnow(),batch_id));return True
-    origin=self.service.cfg.get('deployment',{}).get('public_origin','')
-    required=bool(platform.get('execution_required') or 'execution_callback' in wire)
-    order_confirmation.attach(c,wire,members,required,origin+'/api/receiver/order-status')
+    order_confirmation.attach(c,wire,members,required,callback_url)
     if required:wire['execution_callback']['platform_id']=row['platform_id']
     c.execute('UPDATE robot_batches SET request=? WHERE id=?',(json.dumps(wire,ensure_ascii=False),batch_id))
    frozen=c.execute('SELECT endpoint FROM robot_batches WHERE id=?',(batch_id,)).fetchone();endpoint=frozen['endpoint'] if frozen and frozen['endpoint'] else platform['endpoint']

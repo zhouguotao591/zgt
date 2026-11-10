@@ -12,7 +12,9 @@
  <p>每条订阅配置一个 Telegram Bot 和接收聊天。下单异常逐笔通知。策略表现和开奖占比在北京时间每小时检查一次。</p>
  <form id="robot-notice-form" class="form-grid">
   <label>通知名称<input id="robot-notice-name" maxlength="60" required></label>
-  <label>接收 Chat ID<input id="robot-notice-chat" required placeholder="群组或私聊数字 ID"></label>
+  <label>接收方式<select id="robot-notice-mode"><option value="bot">机器人私聊订阅</option><option value="fixed">固定 Chat ID</option></select></label>
+  <label id="robot-notice-chat-field" hidden>接收 Chat ID<input id="robot-notice-chat" placeholder="群组或私聊数字 ID"></label>
+  <p>私聊发送 /start 或 /subscribe 订阅，发送 /stop 退订。仅发送所选类别的新通知。</p>
   <label>Bot Token<input id="robot-notice-token" type="password" autocomplete="new-password" placeholder="编辑时留空保留"></label>
   <label><input type="checkbox" name="notice_event" value="order" checked>下单异常</label>
   <label><input type="checkbox" name="notice_event" value="strategy" checked>策略表现异常</label>
@@ -35,7 +37,7 @@
    <label for="robot-platform-url">接口地址 <span class="platform-required">*</span></label><input id="robot-platform-url" type="url" placeholder="https://工具域名/api/v1/signals" required><small>填写该工具可访问的完整信号接口地址</small>
    <label for="robot-platform-token">信号源密钥</label><input id="robot-platform-token" type="password" autocomplete="new-password" placeholder="输入该工具生成的密钥，编辑时留空保留"><small>密钥加密保存，不会在页面回显</small>
    <label class="platform-enable-row" for="robot-platform-enabled"><span><strong>启用此平台</strong><small>启用后按会员绑定配置自动推送新订单</small></span><input id="robot-platform-enabled" type="checkbox" role="switch"></label>
-   <label class="platform-enable-row"><span><strong>逐笔执行确认</strong><small>接收端须支持订单回调。开启后仅执行成功的订单计入有效记录。</small></span><input id="robot-platform-execution" type="checkbox" role="switch"></label><div class="platform-modal-note">更改平台配置后，将取消尚未发送的旧消息；过期订单不会补发。</div>
+   <label class="platform-enable-row"><span><strong>合并执行确认</strong><small>接收工具每批回调一次，本站按批次更新会员订单。仅明确执行成功的订单计入有效记录。</small></span><input id="robot-platform-execution" type="checkbox" role="switch"></label><div class="platform-modal-note">更改平台配置后，将取消尚未发送的旧消息；过期订单不会补发。</div>
    <p id="robot-platform-error" role="status"></p>
   </div>
   <footer class="platform-modal-footer"><button id="robot-platform-cancel" type="button" class="secondary">取消</button><button type="submit">保存平台</button></footer>

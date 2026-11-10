@@ -134,7 +134,7 @@ window.pc28RobotReady=true;
    actions=btn('取消','data-ra-modal-close','')+'<button type="submit">释放该笔预留</button>';
   }
  }else if(m.type==='batch'){const d=m.data;html=`<p>第${d.target_draw}期 · ${E(d.recipient_name)} · 平台#${d.platform_id}</p><p>发往账号 #${d.account_id??'—'} / 机器人 #${d.bot_key??'—'} / ${E(d.signal_type)}</p><p class="muted">事件编号 ${E(d.event_id)}；尝试${d.attempts}次</p><div class="ra-batch-message">${E(d.message)}</div><div id="ra-batch-items" class="table-wrap"></div><p>计划发送：${E(beijingTime(d.scheduled_at))}；实际发送：${E(beijingTime(d.sent_at))}</p><p>接口接收：${E(beijingTime(d.accepted_at))} ${E(d.last_error||'')}</p><p class="muted">HTTP已接收不等同实际下单成功。</p>`;actions=btn('关闭','data-ra-modal-close','');}
- $('body').innerHTML=html;$('dialog-actions').innerHTML=actions;if(m.type==='risk-save')$('risk-mode').value=m.bot.risk?.loss_mode||'percent';if(m.type==='batch')table('ra-batch-items',[['订单号',r=>'PC28-'+r.outbox_id],['执行状态',r=>E(({awaiting:'等待执行确认',executed:'执行成功',failed:'执行失败',timeout:'执行超时',rejected:'已拒绝',cancelled:'已取消',unconfirmed:'待核对'})[r.execution_status]||'未启用执行确认')+(r.execution_detail?' · '+E(r.execution_detail):'')],['策略','strategy_name'],['模拟金额',r=>r.simulation_cents==null?'历史未记录':money(r.simulation_cents)],['实际金额',r=>money(r.push_cents)],['内容','message'],['状态','status']],m.data.items);if(m.type==='bot'&&m.bot?.id)$('body').querySelector('[data-b-key]').readOnly=true;summary();}
+ $('body').innerHTML=html;$('dialog-actions').innerHTML=actions;if(m.type==='risk-save')$('risk-mode').value=m.bot.risk?.loss_mode||'percent';if(m.type==='batch')table('ra-batch-items',[['订单号',r=>'PC28-'+r.outbox_id],['执行状态',r=>E(({awaiting:'等待执行确认',executed:'执行成功',failed:'执行失败',timeout:'执行超时',rejected:'已拒绝',cancelled:'已取消',submitted:'已提交发送',unconfirmed:'待核对'})[r.execution_status]||'未启用执行确认')+(r.execution_detail?' · '+E(r.execution_detail):'')],['策略','strategy_name'],['模拟金额',r=>r.simulation_cents==null?'历史未记录':money(r.simulation_cents)],['实际金额',r=>money(r.push_cents)],['内容','message'],['状态','status']],m.data.items);if(m.type==='bot'&&m.bot?.id)$('body').querySelector('[data-b-key]').readOnly=true;summary();}
  form.addEventListener('change',e=>{const row=e.target.closest('[data-sid]');if(row){const on=row.querySelector('[data-ra-sub]').checked;row.querySelectorAll('select,input:not([type=checkbox])').forEach(x=>{x.disabled=!on;x.required=on;});if(e.target.matches('[data-ra-mode]')){const fixed=e.target.value==='fixed',input=row.querySelector('[data-ra-value]');input.value=fixed?String((modal.draft?.default_cents||modal.account?.default_cents||10000)/100):'1';input.min=fixed?'1':'.0001';input.max=fixed?'20000':'100';input.step=fixed?'1':'.0001';}summary();}});form.addEventListener('input',e=>{if(e.target.id==='ra-f-default-cents'&&modal?.draft)modal.draft.default_cents=Number(e.target.value)*100;summary();});
  async function saved(id){dialog.close();modal=null;dirty=false;selected.clear();detail=id?await getAccount(id):null;page=1;await list();}
  form.onsubmit=async e=>{e.preventDefault();if(busy)return;busy=true;form.querySelectorAll('button').forEach(b=>b.disabled=true);$('dialog-error').textContent='正在保存…';try{const m=modal;
@@ -163,16 +163,22 @@ window.pc28RobotReady=true;
  const notice=id=>document.getElementById('robot-notice-'+id);
  const noticeLabels={order:'下单异常',strategy:'策略异常',ratio:'开奖占比'};
  let noticeId=null;
+ function noticeMode(){
+  const fixed=notice('mode').value==='fixed';
+  notice('chat-field').hidden=!fixed;
+  notice('chat').required=fixed;
+ }
  function editNotice(record){
   noticeId=record?.id??null;
   notice('name').value=record?.name??'';notice('chat').value=record?.chat_id??'';
+  notice('mode').value=record?.mode??'bot';noticeMode();
   notice('token').value='';notice('token').required=!record;notice('enabled').checked=record?!!record.enabled:true;
   for(const item of noticeForm.querySelectorAll('[name=notice_event]'))item.checked=!record||record.events.includes(item.value);
  }
  async function loadNotices(){
   try{
    const data=await apiGet('notifications');
-   table('robot-notice-list',[['名称',r=>E(r.name)],['Chat ID',r=>E(r.chat_id)],['订阅类型',r=>r.events.map(x=>noticeLabels[x]).join('、')],
+   table('robot-notice-list',[['名称',r=>E(r.name)],['接收范围',r=>r.mode==='bot'?'私聊订阅 '+r.subscriber_count+' 人':E(r.chat_id)],['订阅类型',r=>r.events.map(x=>noticeLabels[x]).join('、')],
     ['状态',r=>r.enabled?'启用':'停用'],['操作',r=>btn('编辑','data-notice-edit',r.id)]],data.subscriptions);
    notice('list').querySelectorAll('[data-notice-edit]').forEach(b=>b.onclick=()=>editNotice(data.subscriptions.find(r=>r.id===Number(b.dataset.noticeEdit))));
    table('robot-notice-recent',[['时间',r=>E(beijingTime(r.created))],['订阅','subscription_id'],
@@ -181,11 +187,12 @@ window.pc28RobotReady=true;
  }
  if(window.pc28Access&&!window.pc28Access.owner)notice('tab').hidden=true;
  notice('new').onclick=()=>editNotice(null);
+ notice('mode').onchange=noticeMode;noticeMode();
  noticeForm.onsubmit=async event=>{
   event.preventDefault();const button=event.submitter;button.disabled=true;
   try{
    await apiPost('notifications',{id:noticeId,name:notice('name').value.trim(),chat_id:notice('chat').value.trim(),
-    token:notice('token').value.trim(),enabled:notice('enabled').checked,
+    token:notice('token').value.trim(),enabled:notice('enabled').checked,mode:notice('mode').value,
     events:[...noticeForm.querySelectorAll('[name=notice_event]:checked')].map(x=>x.value)});
    notice('status').textContent='订阅已保存';editNotice(null);await loadNotices();
   }catch(error){notice('status').textContent=error.message;}

@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from pc28.auth import AuthError
 from pc28.notifications import hourly_ratios
-from pc28.order_confirmation import expire, receive
+from pc28.order_confirmation import UI_SUBMISSION_ATTEMPTED, expire, receive
 from test_robot_signals import RobotTests
 
 
@@ -19,7 +19,7 @@ class ConfirmationTests(unittest.TestCase):
     order = RobotTests.order
     ready = RobotTests.ready
 
-    def test_acceptance_is_not_execution_and_partial_batch_is_idempotent(self):
+    def test_batch_confirmation_applies_once_to_all_member_orders(self):
         self.s.robot=self.r
         self.s.cfg['deployment']={'public_origin':'https://example.test'}
         self.permit('size')
@@ -41,22 +41,25 @@ class ConfirmationTests(unittest.TestCase):
             self.assertTrue(self.r.deliver_one())
             wire=json.loads(opener.return_value.open.call_args.args[0].data)
         self.assertEqual(len(wire['orders']),2)
+        self.assertEqual(wire['execution_callback']['version'],2)
         self.assertEqual(self.s.db.query('SELECT * FROM member_orders'),[])
         self.assertEqual({r['status'] for r in self.s.db.query('SELECT status FROM robot_execution')},{'awaiting'})
         auth='Bearer test-token-not-real-123'
-        body={'platform_id':1,'event_id':wire['event_id'],'order_no':wire['orders'][0]['order_no'],
+        body={'platform_id':1,'event_id':wire['event_id'],'batch_id':wire['event_id'],
               'status':'executed','executed_at':int(time.time())}
         with self.assertRaises(AuthError):receive(self.s,'Bearer invalid',body)
-        self.assertTrue(receive(self.s,auth,body)['ok'])
+        scoped=hmac.digest(b'test-token-not-real-123',
+                           '\n'.join(('1',wire['event_id'],wire['event_id'])).encode(),'sha256').hex()
+        submitted={**body,'status':'unknown','detail':UI_SUBMISSION_ATTEMPTED}
+        self.assertEqual(receive(self.s,'PC28-Order '+scoped,submitted)['orders'],2)
+        self.assertTrue(receive(self.s,'PC28-Order '+scoped,submitted)['duplicate'])
+        self.assertEqual({r['status'] for r in self.s.db.query('SELECT status FROM robot_execution')},{'submitted'})
+        self.assertEqual(self.s.db.query('SELECT * FROM member_orders'),[])
+        self.assertEqual(receive(self.s,'PC28-Order '+scoped,body)['orders'],2)
         self.assertTrue(receive(self.s,auth,body)['duplicate'])
         with self.assertRaises(AuthError):receive(self.s,auth,{**body,'status':'failed'})
-        failed={**body,'order_no':wire['orders'][1]['order_no'],'status':'timeout','detail':'工具确认执行前超时'}
-        scoped=hmac.digest(b'test-token-not-real-123',
-                           '\n'.join(('1',wire['event_id'],failed['order_no'])).encode(),'sha256').hex()
-        self.assertTrue(receive(self.s,'PC28-Order '+scoped,failed)['ok'])
-        self.assertTrue(receive(self.s,auth,failed)['duplicate'])
-        self.assertEqual(len(self.s.db.query('SELECT * FROM member_orders')),1)
-        self.assertEqual(len(self.s.db.query('SELECT * FROM notice_queue')),1)
+        self.assertEqual(len(self.s.db.query('SELECT * FROM member_orders')),2)
+        self.assertEqual(self.s.db.query('SELECT * FROM notice_queue'),[])
 
     def test_missing_callback_alerts_once_and_never_books_order(self):
         with self.s.db.tx() as c:
@@ -66,6 +69,24 @@ class ConfirmationTests(unittest.TestCase):
             expire(c,12)
         self.assertEqual(self.s.db.query('SELECT status FROM robot_execution')[0]['status'],'unconfirmed')
         self.assertEqual(len(self.s.db.query('SELECT * FROM notice_events')),1)
+        self.assertEqual(self.s.db.query('SELECT * FROM member_orders'),[])
+
+    def test_batch_timeout_marks_all_members_without_booking(self):
+        self.s.robot=self.r
+        event='pc28-batch-timeout-test'
+        with self.s.db.tx() as c:
+            c.execute('INSERT INTO robot_batches(id,request,created) VALUES(?,?,?)',
+                      (event,json.dumps({'event_id':event,'execution_callback':{'version':2},
+                                        'orders':[{'order_no':'PC28-1'},{'order_no':'PC28-2'}]}),'t'))
+            for order_id in (1,2):
+                c.execute("""INSERT INTO robot_outbox(id,event_id,name,event_time,created,request,message,status,attempts)
+                    VALUES(?,?,'bot',1,'t','{}','大10','sent',1)""",(order_id,f'order-{order_id}'))
+                c.execute('INSERT INTO robot_batch_items VALUES(?,?)',(order_id,event))
+                c.execute("INSERT INTO robot_execution(outbox_id,updated,deadline) VALUES(?,'t',10)",(order_id,))
+        body={'platform_id':1,'event_id':event,'batch_id':event,'status':'timeout'}
+        self.assertEqual(receive(self.s,'Bearer test-token-not-real-123',body)['orders'],2)
+        self.assertTrue(receive(self.s,'Bearer test-token-not-real-123',body)['duplicate'])
+        self.assertEqual([r['status'] for r in self.s.db.query('SELECT status FROM robot_execution')],['timeout','timeout'])
         self.assertEqual(self.s.db.query('SELECT * FROM member_orders'),[])
 
     def test_hourly_ratio_strictly_above_four_points_fans_out_once(self):

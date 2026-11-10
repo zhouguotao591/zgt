@@ -126,9 +126,8 @@ class Auth:
    users=self.db.query('SELECT * FROM web_users WHERE id=? AND active=1',(row['user_id'],))
    if not users:return None,None
    user=users[0]
-   from .mfa import required
    if scope=='admin' and user['role']!='admin' or scope=='member_center' and user['role']!='member':return None,None
-   if required(scope,user) and not row['mfa_verified']:return None,None
+   if self.mfa.is_required(scope,user) and not row['mfa_verified']:return None,None
   return row,user
  def renew_session(self,cookie,row,scope):
   now=int(time.time());expires=now+LOGIN_SESSION_SECONDS
@@ -217,8 +216,7 @@ class Auth:
     raise AuthError('登录状态已变化，请重新登录',401,'invalid_credentials')
    if not c.execute('SELECT 1 FROM web_sessions WHERE token_hash=? AND expires>?',(session['token_hash'],int(time.time()))).fetchone():
     raise AuthError('会话校验已过期，请刷新后重试',403,'invalid_session')
-   from .mfa import required
-   if required(scope,current):
+   if self.mfa.is_required(scope,current):
     mode='verify' if c.execute('SELECT 1 FROM web_totp_credentials WHERE user_id=?',(current['id'],)).fetchone() else 'enroll'
     return self.mfa.begin(c,current,session,mode)
    return self.finish_login(c,current,session,ip)
