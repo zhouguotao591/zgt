@@ -2,6 +2,8 @@ import json
 import hmac
 import time
 import unittest
+import urllib.error
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -61,6 +63,35 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(len(self.s.db.query('SELECT * FROM member_orders')),2)
         self.assertEqual(self.s.db.query('SELECT * FROM notice_queue'),[])
 
+    def test_opaque_http_400_keeps_batch_unconfirmed_and_held(self):
+        self.s.robot=self.r
+        self.s.cfg['deployment']={'public_origin':'https://example.test'}
+        self.permit('size');self.permit('parity')
+        self.order('size');self.order('parity','单')
+        self.r.capture();self.ready()
+        now=datetime.now(timezone.utc);previous=now-timedelta(seconds=50)
+        self.s.db.import_records([{'id':998,'time':previous.isoformat(),'numbers':list(range(1,21))}],'test')
+        with self.s.db.tx() as c:
+            c.execute("UPDATE robot_platforms SET execution_required=1 WHERE id=1")
+            plan={'next_draw_id':999,'next_draw_at':(previous+timedelta(seconds=210)).isoformat()}
+            c.execute("INSERT OR REPLACE INTO runtime_state VALUES('draw_timer',?,?)",(json.dumps(plan),now.isoformat()))
+            c.execute("INSERT INTO notice_subscriptions(name,chat_id,events,enabled) VALUES('test','1','[\"order\"]',1)")
+            c.execute("INSERT INTO robot_risk_holds SELECT id,987,push_cents FROM robot_outbox")
+        error=urllib.error.HTTPError('https://receiver.test',400,'Bad Request',{},BytesIO(b'{"error":"internal enqueue error"}'))
+        with patch('pc28.maintenance.live_guard',return_value=''),patch('pc28.robot_signals.urllib.request.build_opener') as opener:
+            opener.return_value.open.side_effect=error
+            self.assertTrue(self.r.deliver_one())
+            wire=json.loads(opener.return_value.open.call_args.args[0].data)
+        self.assertEqual({r['status'] for r in self.s.db.query('SELECT status FROM robot_execution')},{'unconfirmed'})
+        self.assertEqual(len(self.s.db.query('SELECT * FROM notice_queue')),1)
+        self.assertEqual(len(self.s.db.query('SELECT * FROM robot_risk_holds')),2)
+        self.assertEqual(self.s.db.query('SELECT * FROM member_orders'),[])
+        result=receive(self.s,'Bearer test-token-not-real-123',{'platform_id':1,'event_id':wire['event_id'],
+                       'batch_id':wire['event_id'],'status':'executed','executed_at':int(time.time())})
+        self.assertTrue(result['valid'])
+        self.assertEqual(self.s.db.query('SELECT * FROM robot_risk_holds'),[])
+        self.assertEqual(len(self.s.db.query('SELECT * FROM member_orders')),2)
+
     def test_missing_callback_alerts_once_and_never_books_order(self):
         with self.s.db.tx() as c:
             c.execute("INSERT INTO robot_outbox(event_id,name,event_time,created,request,message,status) VALUES('test','bot',1,'t','{}','大10','sent')")
@@ -75,6 +106,7 @@ class ConfirmationTests(unittest.TestCase):
         self.s.robot=self.r
         event='pc28-batch-timeout-test'
         with self.s.db.tx() as c:
+            c.execute("INSERT INTO notice_subscriptions(name,chat_id,events,enabled) VALUES('test','1','[\"order\"]',1)")
             c.execute('INSERT INTO robot_batches(id,request,created) VALUES(?,?,?)',
                       (event,json.dumps({'event_id':event,'execution_callback':{'version':2},
                                         'orders':[{'order_no':'PC28-1'},{'order_no':'PC28-2'}]}),'t'))
@@ -87,6 +119,11 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(receive(self.s,'Bearer test-token-not-real-123',body)['orders'],2)
         self.assertTrue(receive(self.s,'Bearer test-token-not-real-123',body)['duplicate'])
         self.assertEqual([r['status'] for r in self.s.db.query('SELECT status FROM robot_execution')],['timeout','timeout'])
+        notices=self.s.db.query('SELECT message FROM notice_queue')
+        self.assertEqual(len(notices),1)
+        self.assertIn('PC28-1',notices[0]['message'])
+        self.assertIn('PC28-2',notices[0]['message'])
+        self.assertIn(event,notices[0]['message'])
         self.assertEqual(self.s.db.query('SELECT * FROM member_orders'),[])
 
     def test_hourly_ratio_strictly_above_four_points_fans_out_once(self):

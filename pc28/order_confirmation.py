@@ -48,6 +48,19 @@ def alert(c, order, status, detail):
         except (TypeError,ValueError):wire={}
         if wire.get('account_id') is not None:account=f"工具账号#{wire['account_id']}"
         if wire.get('bot_key') is not None:robot=f"{order['name']}（机器人#{wire['bot_key']}）"
+    batch=c.execute('SELECT batch_id FROM robot_batch_items WHERE outbox_id=?',(order['id'],)).fetchone()
+    entries=[]
+    event_key=f"{order['id']}:{status}"
+    if batch:
+        entries=c.execute('''SELECT o.* FROM robot_outbox o
+            JOIN robot_batch_items i ON i.outbox_id=o.id WHERE i.batch_id=?
+            AND o.recipient_id IS ? ORDER BY o.id''',(batch[0],order['recipient_id'])).fetchall() if 'recipient_id' in order.keys() else []
+        if len(entries)>1:
+            event_key=f"batch:{batch[0]}:{order['recipient_id']}"
+            # Existing per-order alerts also count when upgrading a running site.
+            if any(c.execute("SELECT 1 FROM notice_events WHERE kind='order' AND event_key LIKE ?",
+                             (f"{entry['id']}:%",)).fetchone() for entry in entries):
+                return
     amount=order['push_cents']/100 if order['push_cents'] is not None else None
     message=(f"下单异常 · {statuses.get(status,status)}\n会员：{member}\n下单账号：{account}"
              +f"\n机器人：{robot}"
@@ -57,7 +70,18 @@ def alert(c, order, status, detail):
              +f"\n订单内容：{order['message']}"
              +(f" · 实际推送金额 {amount:g} U" if amount is not None else '')
              +f"\n异常原因：{detail[:1200] if detail else '未返回具体原因，请核对接收工具执行日志'}")
-    enqueue(c, 'order', f"{order['id']}:{status}", message)
+    if len(entries)>1:
+        header=message.split('\n订单：',1)[0]
+        lines=[f"PC28-{entry['id']} · {entry['strategy_name'] or entry['strategy_id'] or '未记录'} · {entry['message']}"
+               for entry in entries]
+        listing='\n'.join(lines)
+        if len(listing)>2400:
+            listing=listing[:2400]+'\n其余明细请在站点查看'
+        total=sum(entry['push_cents'] or 0 for entry in entries)/100
+        message=(header+f"\n合并批次：{batch[0]}\n第 {order['target_draw']} 期 · 共 {len(entries)} 笔"
+                 +f"\n{listing}\n合计推送金额：{total:g} U"
+                 +f"\n异常原因：{detail[:600] if detail else '未返回具体原因，请核对接收工具执行日志'}")
+    enqueue(c, 'order', event_key, message)
 
 
 def terminal(c, order, status, detail):

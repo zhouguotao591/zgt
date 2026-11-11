@@ -438,6 +438,7 @@ class RobotSignals(Accounts,Platforms):
   except urllib.error.HTTPError as e:status=e.code;error=receiver_error(e);retry=status in (408,425,429) or status>=500
   except (urllib.error.URLError,TimeoutError,OSError):error='无法连接机器人接口或请求超时';retry=True
   except Exception:error='机器人密钥读取或请求构建失败'
+  uncertain_rejection=status==400 and error=='接收端返回 HTTP 400'
   attempts=row['attempts']+1;success=status is not None and 200<=status<300
   state='sent' if success else 'expired' if status==410 and 'expires_at' in wire else 'retry' if retry and attempts<cfg['max_attempts'] else 'failed';delay=min(60,5*2**(attempts-1))
   with self.service.lock,self.db.tx() as c:
@@ -449,10 +450,16 @@ class RobotSignals(Accounts,Platforms):
     c.execute("""DELETE FROM robot_risk_holds WHERE outbox_id IN
       (SELECT i.outbox_id FROM robot_batch_items i JOIN member_orders m ON m.outbox_id=i.outbox_id WHERE i.batch_id=?)""",(batch_id,))
     settle(c)
-   elif attempts==1 and (not attempted or status is not None and 400<=status<500 and not retry):
+   elif attempts==1 and not uncertain_rejection and (not attempted or status is not None and 400<=status<500 and not retry):
     c.execute('DELETE FROM robot_risk_holds WHERE outbox_id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)',(batch_id,))
    if not success and state in ('failed','expired') and not row['is_test']:
     for member in members:
+     if uncertain_rejection:
+      changed=c.execute("UPDATE robot_execution SET status='unconfirmed',detail=?,updated=? WHERE outbox_id=? AND status='awaiting'",
+                        ('接收端返回 HTTP 400，是否已创建任务尚待核对',utcnow(),member['id'])).rowcount
+      if changed or not c.execute('SELECT 1 FROM robot_execution WHERE outbox_id=?',(member['id'],)).fetchone():
+       order_confirmation.alert(c,member,'unconfirmed','接收端返回 HTTP 400，是否已创建任务尚待核对；请按合并批次编号核对接收工具')
+      continue
      if not attempted or attempts==1 and status is not None and 400<=status<500 and not retry:
       if order_confirmation.terminal(c,member,'rejected',error):continue
      order_confirmation.alert(c,member,'发送异常',error)
