@@ -40,7 +40,7 @@ def validate_settings(cfg,settings):
 def save(service,body):
  from .strategy_delete import require_available
  require_available(service.db,body.get("id"))
- if isinstance(body.get('settings'),dict) and body['settings'].get('strategy_type') in ('hourly','majority','previous','single','algorithm'):
+ if isinstance(body.get('settings'),dict) and body['settings'].get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
   from .follow_strategy import save as save_follow
   return save_follow(service,body)
  if body.get('id') in ('parity','size'):
@@ -92,10 +92,10 @@ def tick(db,cfg,now=None):
    if not r:continue
    a=c.execute('SELECT * FROM custom_strategies WHERE id=?',(o['strategy'],)).fetchone()
    kind=json.loads(o['strategy_json']).get('strategy_type')
-   if kind=='algorithm':
+   if kind in ('algorithm','algorithm_rank'):
     from .algorithm_hall import VERIFIED
     if r['verification'] not in VERIFIED or not r['draw_utc'] or datetime.fromisoformat(r['draw_utc'])>now:continue
-   if kind in ('hourly','majority','previous','single','algorithm'):
+   if kind in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
     from .follow_strategy import settle_one
     settle_one(c,o,r,a);continue
    st=json.loads(a['state']);s=Strategy(**json.loads(o['strategy_json']));hit=r[s.axis]==s.direction;paid=settlement(o['stake'],s.direction,r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit']
@@ -106,13 +106,14 @@ def tick(db,cfg,now=None):
    c.execute("UPDATE custom_orders SET status='settled',pnl=?,hit=?,outcome=?,total=?,settled=? WHERE id=?",(paid['pnl'],int(hit),paid['outcome'],r['total'],utcnow(),o['id']))
    c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
    c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?),state=? WHERE id=?',(balance,balance,json.dumps(st,ensure_ascii=False),o['strategy']))
- history=db.tail(1001)
+ rank_windows=[json.loads(r['settings']).get('rank_window',0) for r in db.query('SELECT settings FROM custom_strategies WHERE enabled=1')]
+ history=db.tail(max(1001,max(rank_windows,default=0)+51))
  if not history:return
  latest=history[-1];target=latest['id']+1
  with db.tx() as c:
   for a in c.execute('SELECT * FROM custom_strategies WHERE enabled=1').fetchall():
    key=a['id'];settings=json.loads(a['settings']);st=json.loads(a['state'])
-   if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm'):
+   if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
     from .follow_strategy import tick_one
     tick_one(c,a,history,cfg,now);continue
    if c.execute('SELECT 1 FROM custom_decisions WHERE strategy=? AND target_draw=?',(key,target)).fetchone():continue
@@ -158,7 +159,7 @@ def catalog(db):
  rows=[]
  for a in db.query('SELECT * FROM custom_strategies ORDER BY created,id'):
   settings=json.loads(a['settings']);orders=db.query('SELECT * FROM custom_orders WHERE strategy=? ORDER BY target_draw,id',(a['id'],));last=db.query('SELECT reason FROM custom_decisions WHERE strategy=? ORDER BY target_draw DESC LIMIT 1',(a['id'],))
-  if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm'):
+  if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
    from .follow_strategy import rule_text,next_stake,adjusts_amount
    settings={**{'win_limit':5 if settings['strategy_type']=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0},**settings};settings={**({'win_decrement_cents':0,'stake_floor':'market','max_increase_steps':0,'max_decrease_steps':0} if settings['strategy_type']=='single' else {}),**settings};state=json.loads(a['state']);stats=summary(orders,a['initial_balance']);stats['next_stake']=(state.get('next_stake',settings['base_cents']) if adjusts_amount(settings) else next_stake(settings,state.get('losses',0)))/100
    rows.append({'id':a['id'],'name':a['name'],'enabled':bool(a['enabled']),'paused':False,'editable':True,'editor_type':settings['strategy_type'],'settings':settings,'status':'已停用' if not a['enabled'] else '等待开奖' if any(o['status']=='pending' for o in orders) else '连胜暂停至'+str(state['pause_until'])+'期' if state.get('pause_until',0)>(db.tail(1)[-1]['id'] if db.tail(1) else 0) else last[0]['reason'] if last else '等待下一期检查','rules':rule_text(settings),'win_streak':state.get('win_streak',0),'pause_until':state.get('pause_until',0),'stats':stats,'follow_start':state.get('follow_start'),'follow_end':state.get('follow_end'),'follow_direction':state.get('direction')});continue

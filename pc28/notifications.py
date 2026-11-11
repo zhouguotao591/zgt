@@ -30,16 +30,12 @@ def enqueue(c, kind, key, message):
     c.execute("""INSERT INTO notice_queue(subscription_id,message,created)
         SELECT id,?,? FROM notice_subscriptions WHERE enabled=1 AND mode='fixed'
         AND EXISTS(SELECT 1 FROM json_each(events) WHERE value=?)""",(message,utcnow(),kind))
-    public_message = {
-        'order': '下单异常：有订单的执行状态异常，请在系统内查看。',
-        'strategy': '策略表现异常：有策略触发异常条件，请在系统内查看。',
-    }.get(kind, message)
     c.execute("""INSERT INTO notice_queue(subscription_id,message,created,subscriber_chat)
         SELECT s.id,?,?,m.chat_id FROM notice_subscriptions s
         JOIN notice_bot_subscribers m ON m.subscription_id=s.id
         WHERE s.enabled=1 AND s.mode='bot' AND m.active=1
         AND EXISTS(SELECT 1 FROM json_each(s.events) WHERE value=?)""",
-        (public_message,utcnow(),kind))
+        (message,utcnow(),kind))
 
 
 def hourly_ratios(c, start, end):
@@ -54,38 +50,65 @@ def hourly_ratios(c, start, end):
     for a,b,count in [('大','小',row['big']),('单','双',row['odd'])]:
         gap=abs(2*count-n)
         if gap*100>4*n:
-            lines.append(f'{a} {count/n:.1%} / {b} {(n-count)/n:.1%} · 差 {gap*100/n:.2f} 个百分点')
+            direction,amount=(a,count) if count*2>n else (b,n-count)
+            lines.append(f'{a}{b}达标方向：{direction} · 占比 {amount/n:.2%}（{amount}/{n}期） · 两侧占比差 {gap*100/n:.2f} 个百分点（阈值：超过4个百分点）')
     if lines:
-        enqueue(c,'ratio',start.isoformat(),f'每小时开奖占比 · 北京时间 {start:%Y-%m-%d %H:%M}–{end:%H:%M} · {n} 期\n'+'\n'.join(lines))
+        start=start.astimezone(ZoneInfo('Asia/Shanghai'));end=end.astimezone(ZoneInfo('Asia/Shanghai'))
+        enqueue(c,'ratio',start.isoformat(),f'每小时开奖占比 · 北京时间 {start:%Y-%m-%d %H:%M}–{end:%H:%M}\n总开奖期数：{n} 期\n大：{row["big"]} 期（{row["big"]/n:.2%}） · 小：{n-row["big"]} 期（{(n-row["big"])/n:.2%}）\n单：{row["odd"]} 期（{row["odd"]/n:.2%}） · 双：{n-row["odd"]} 期（{(n-row["odd"])/n:.2%}）\n'+'\n'.join(lines))
 
 
 def strategy_alerts(c, cfg, now):
+    """Hourly alerts distinguish observed losses/drawdown from configured limits."""
+    from .trend_strategy import settings as trend_settings
     sources=[]
-    if cfg['simulation']['enabled']:sources.append(('orders',None,'三十期买单反转策略'))
+    if cfg['simulation']['enabled']:
+        sources.append(('orders',None,'三十期买单反转策略',cfg['simulation']))
     for axis in cfg['trend_simulation'].get('enabled_axes',[]):
-        sources.append(('trend_orders',axis,'大小策略' if axis=='size' else '单双策略'))
-    sources.extend(('custom_orders',r['id'],r['name']) for r in c.execute('SELECT id,name FROM custom_strategies WHERE enabled=1'))
-    for table,key,name in sources:
+        sources.append(('trend_orders',axis,'大小策略' if axis=='size' else '单双策略',trend_settings(cfg,axis)))
+    sources.extend(('custom_orders',r['id'],r['name'],json.loads(r['settings']))
+                   for r in c.execute('SELECT id,name,settings FROM custom_strategies WHERE enabled=1'))
+    for table,key,name,settings in sources:
         scope='' if key is None else ' AND o.strategy=?'
         args=() if key is None else (key,)
         if table=='custom_orders':
             scope+=" AND NOT EXISTS(SELECT 1 FROM gap_order_tags g WHERE g.engine='custom' AND g.order_id=o.id)"
-        rows=c.execute(f"""SELECT o.id,o.pnl,o.target_draw FROM {table} o WHERE o.status='settled'
-            AND o.pnl IS NOT NULL AND julianday(o.settled)>=julianday(?){scope}
-            ORDER BY o.target_draw DESC,o.id DESC LIMIT 20""",((now-timedelta(days=1)).isoformat(),*args)).fetchall()
-        if not rows:continue
+        all_rows=c.execute(f"""SELECT o.id,o.pnl,o.target_draw,o.settled FROM {table} o
+            WHERE o.status='settled' AND o.pnl IS NOT NULL AND julianday(o.settled)<=julianday(?){scope}
+            ORDER BY o.target_draw,o.id""",(now.isoformat(),*args)).fetchall()
+        if not all_rows:continue
+        day_start=now.astimezone(timezone.utc).replace(hour=0,minute=0,second=0,microsecond=0)
+        recent_cutoff=now-timedelta(days=1)
+        rows=[r for r in reversed(all_rows) if datetime.fromisoformat(r['settled'])>=recent_cutoff][:20]
         streak=0
         for row in rows:
             if row['pnl']>=0:break
             streak+=1
         wins=sum(r['pnl']>0 for r in rows)
+        equity=peak=max_dd=0
+        for row in all_rows:
+            equity+=row['pnl'];peak=max(peak,equity);max_dd=max(max_dd,peak-equity)
+        drawdown=peak-equity
+        daily=sum(r['pnl'] for r in all_rows if datetime.fromisoformat(r['settled'])>=day_start)
         reasons=[]
-        if streak>=5:reasons.append(f'连续亏损 {streak} 笔')
-        if len(rows)==20 and wins*100<35*20:reasons.append(f'近20单盈利率 {wins/20:.0%}')
+        if streak>=5:reasons.append(f'连续亏损 {streak} 笔（阈值≥5笔）')
+        if len(rows)==20 and wins*100<35*20:reasons.append(f'近20单盈利率 {wins/20:.1%}（阈值<35%）')
+        daily_limit=settings.get('daily_loss_limit',0)
+        dd_limit=settings.get('max_drawdown',0)
+        if daily_limit>0 and -daily>=round(daily_limit*100):
+            reasons.append(f'当日净亏损 {-daily/100:.2f} U，达到单日亏损限额 {daily_limit:g} U（UTC日）')
+        if dd_limit>0 and drawdown>=round(dd_limit*100):
+            reasons.append(f'当前回撤 {drawdown/100:.2f} U，达到回撤限额 {dd_limit:g} U')
         if reasons:
             net=sum(r['pnl'] for r in rows)/100
-            enqueue(c,'strategy',f"{table}:{key}:{now.strftime('%Y%m%d%H')}",
-                    f"策略表现异常 · {name}\n{'，'.join(reasons)} · 近 {len(rows)} 笔净收益 {net:+.2f} U\n截至第 {rows[0]['target_draw']} 期")
+            message='\n'.join([
+                f"策略表现异常 · {name}（{key or 'legacy'}）",
+                '异常：'+'；'.join(reasons),
+                f"近24小时内最近 {len(rows)} 单净收益：{net:+.2f} U",
+                f"累计已结算净收益：{equity/100:+.2f} U",
+                f"当前回撤：{drawdown/100:.2f} U；历史最大回撤：{max_dd/100:.2f} U",
+                f"截至第 {all_rows[-1]['target_draw']} 期 · 检查时间（北京）：{now.astimezone(ZoneInfo('Asia/Shanghai')):%Y-%m-%d %H:%M:%S}",
+                '统计范围：策略实时模拟订单，排除历史补单；不代表会员实际账户收益。'])
+            enqueue(c,'strategy',f"{table}:{key}:{now.strftime('%Y%m%d%H')}",message)
 
 
 class Notifications:

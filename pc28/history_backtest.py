@@ -6,8 +6,8 @@ from zoneinfo import ZoneInfo
 from dataclasses import asdict
 from .model import Strategy,money,settlement,rounded_ratio,utcnow
 from .trend_strategy import settings as trend_settings,signal,progress,risk_reason,summary
-from .follow_strategy import hourly_signal,next_stake,previous_amount,adjusts_amount,algorithm_signal,settle_algorithm_round
-from .algorithm_hall import VERIFIED
+from .follow_strategy import hourly_signal,next_stake,previous_amount,adjusts_amount,algorithm_signal,settle_algorithm_round,rank_signal
+from .algorithm_hall import VERIFIED,RollingRanking
 from .router import choose
 from . import win_pause,maintenance
 BJ=ZoneInfo('Asia/Shanghai')
@@ -29,9 +29,9 @@ def selection(service,key):
  rows=service.db.query('SELECT id,name,settings FROM custom_strategies WHERE id=?',(key,))
  if not rows:raise ValueError('策略不存在')
  row=rows[0];settings=json.loads(row['settings']);kind=settings.get('strategy_type','reversal')
- if kind not in ('reversal','majority','hourly','previous','single','algorithm'):raise ValueError('该策略类型无法识别')
+ if kind not in ('reversal','majority','hourly','previous','single','algorithm','algorithm_rank'):raise ValueError('该策略类型无法识别')
  snapshot={'id':key,'name':row['name'],'kind':kind,'settings':settings,'odds':cfg['odds'],'selections':[],'snapshot_at':utcnow()}
- if kind=='algorithm':snapshot['hidden_algorithms']=sorted(service.algorithm_hall.hidden())
+ if kind in ('algorithm','algorithm_rank'):snapshot['hidden_algorithms']=sorted(service.algorithm_hall.hidden())
  return snapshot
 def prepare(service,args):
  if not isinstance(args,dict) or 'strategy_id' not in args or set(args)-{'strategy_id','range_mode','start','end','periods'}:raise ValueError('回测参数无效')
@@ -124,12 +124,14 @@ def replay(rows,snapshot,on_progress=None):
  cfg=snapshot['settings'];kind=snapshot['kind'];odds=snapshot['odds'];initial=money(cfg['initial_balance']);balance=peak=initial;daily=0;day='';orders=[];skips=Counter();hour_cache={};state={'cycle':0,'losses':0,'attempt':0,'win_streak':0,'pause_until':0};last_direction=None;curve=[];equity=0
  stored={r['month']:r for r in snapshot.get('selections',[])}
  hidden=set(snapshot.get('hidden_algorithms',[]))
+ ranker=RollingRanking(cfg['axis'],cfg['rank_window'],hidden) if kind=='algorithm_rank' else None
  for i,r in enumerate(rows):
   if on_progress and i%1000==0:on_progress(i,len(rows))
   time=r['_time'];utcday=time.astimezone(timezone.utc).date().isoformat()
   if day!=utcday:day=utcday;daily=0
   if not i:skips['观察窗口预热']+=1;continue
-  history=rows[max(0,i-1001):i];prev=history[-1];target=r['id'];decision=time-timedelta(microseconds=1)
+  history=rows[max(0,i-(52 if kind=='algorithm_rank' else 1001)):i];prev=history[-1];target=r['id'];decision=time-timedelta(microseconds=1)
+  if ranker is not None:ranker.update([v for v in history if v.get('verification') in VERIFIED])
   rest_reason=maintenance.block_reason(prev,decision,snapshot.get('maintenance_guard',True),time)
   if rest_reason:
    if kind=='reversal':state.update(active=False,waiting_rearm=False)
@@ -168,10 +170,10 @@ def replay(rows,snapshot,on_progress=None):
    direction=cfg['direction'];stake=state.get('next_stake',cfg['base_cents']) if adjusts_amount(cfg) else next_stake(cfg,state['losses']);step=state['losses']+1
   elif kind=='previous':
    direction=prev[cfg['axis']];stake=state.get('next_stake',cfg['base_cents']);step=state['attempt']+1
-  elif kind=='algorithm':
+  elif kind in ('algorithm','algorithm_rank'):
    if r.get('verification') not in VERIFIED:skips['目标开奖尚未核验']+=1;continue
    algorithm_state=state.copy()
-   direction,evidence,why=algorithm_signal(history,cfg,algorithm_state,target,hidden)
+   direction,evidence,why=rank_signal(history,cfg,algorithm_state,target,hidden,ranker) if kind=='algorithm_rank' else algorithm_signal(history,cfg,algorithm_state,target,hidden)
    if not direction:skips[why]+=1;continue
    stake=state.get('next_stake',cfg['base_cents']);step=algorithm_state['attempt']+1
   elif kind=='majority':
@@ -213,7 +215,7 @@ def replay(rows,snapshot,on_progress=None):
    if kind in ('majority','single') and reset:state['cycle']+=1
    if kind=='hourly' and win_stop:state['follow_end']=None
   orders.append({'target_draw':target,'cutoff_draw':prev['id'],'beijing_time':time.astimezone(BJ).strftime('%Y-%m-%d %H:%M:%S'),'direction':direction,'ratio':ratio,'stake':stake,'credit':paid['credit'],'status':'settled','pnl':paid['pnl'],'hit':int(hit),'outcome':paid['outcome'],'total':r['total'],'cycle':cycle,'step':step,'max_bets':max_bets,'round_end':end_round,'pause_until':state.get('pause_until',0),'equity':equity/100})
-  if kind=='algorithm':
+  if kind in ('algorithm','algorithm_rank'):
    orders[-1].update(algorithm_ids=evidence[0]['algorithm_ids'],algorithm_votes=evidence[0]['votes'])
   curve.append({'draw':target,'net':equity/100,'time':time.astimezone(BJ).isoformat()})
  result=summary(orders,initial);result['curve']=curve if len(curve)<=400 else [curve[i] for i in sorted({int(i*(len(curve)-1)/399) for i in range(400)})];result.update(skips=dict(skips),periods_skipped=sum(skips.values()),initial_balance=initial/100,balance=balance/100)
@@ -234,7 +236,7 @@ def execute(service,prepared,on_progress=None):
  result['window_returns']={'selected':{'net':result['net'],'bets':result['bets'],'coverage':coverage}} if custom else {'one_month':{'net':month_result['net'],'bets':month_result['bets'],'coverage':month_coverage},'three_months':{'net':result['net'],'bets':result['bets'],'coverage':coverage},'method':'两段均以当前参数快照及独立初始本金回放，预热限于各自窗口；不是截取三个月回测的末月收益'}
  run_id=uuid.uuid4().hex;created=utcnow();prefix='history-'+run_id
  result.update(run_id=run_id,created=created,strategy=snap,coverage=coverage,file='/exports/'+prefix+'.csv',summary_file='/exports/'+prefix+'.json',notes=['仅使用本地最新开奖时间向前3个自然月范围内的记录，预热也不读取更早数据。','按目标期之前的数据判断，使用当前参数及赔率；未模拟当时网络延迟，假设开奖结果当期可用。','回测采用独立初始本金，执行资金限制、轮次、连胜暂停与胜负差值永久暂停；不修改真实模拟账户和订单。','结果为历史假设回放，不代表未来收益；月度/自适应模式仅采用当时已保存的候选快照。'])
- if snap['kind'] in ('previous','algorithm'):
+ if snap['kind'] in ('previous','algorithm','algorithm_rank'):
   result['amount_counting']='cumulative-v2'
   result['notes'].append('加额与减额分别按已结算订单累计，输赢交替和退本金不清零；任一项达到上限后下一单恢复基础金额，两项同时重新计数。')
  result['range']=spec
@@ -251,6 +253,22 @@ def execute(service,prepared,on_progress=None):
   c.execute('INSERT INTO history_backtest_runs VALUES(?,?,?)',(run_id,created,json.dumps(result,ensure_ascii=False)))
   if not custom:c.execute('INSERT INTO strategy_backtest_summary(strategy,run_id,created,summary) VALUES(?,?,?,?) ON CONFLICT(strategy) DO UPDATE SET run_id=excluded.run_id,created=excluded.created,summary=excluded.summary',(snap['id'],run_id,created,json.dumps({'window_returns':result['window_returns'],'settings':snap['settings']},ensure_ascii=False)))
   c.executemany('INSERT INTO history_backtest_orders VALUES(?,?,?)',((run_id,i,json.dumps(o,ensure_ascii=False)) for i,o in enumerate(orders)))
+ return result
+
+PERIOD_CANDLES={f'{n}p':n for n in (1,5,10,20,50,100,500)}
+
+def period_candles(records,interval,first,last):
+ records=list(records)
+ if first is None or last is None:return []
+ size=PERIOD_CANDLES[interval];grouped={};equity=0
+ for r in records:
+  slot=(r['target_draw']-first)//size
+  bar=grouped.setdefault(slot,{'open':equity,'high':equity,'low':equity,'close':equity,'orders':0,'time':r['beijing_time']})
+  equity+=r['pnl'];bar['high']=max(bar['high'],equity);bar['low']=min(bar['low'],equity);bar['close']=equity;bar['orders']+=1
+ result=[];carry=0
+ for slot in range((last-first)//size+1):
+  bar=grouped.get(slot,{'open':carry,'high':carry,'low':carry,'close':carry,'orders':0,'time':None});carry=bar['close']
+  result.append({**bar,**{k:bar[k]/100 for k in ('open','high','low','close')},'first_draw':first+slot*size,'last_draw':min(last,first+(slot+1)*size-1)})
  return result
 
 def income_candles(records,interval='1h',start=None,end=None):
@@ -279,13 +297,14 @@ def result_page(db,run_id,page=1,page_size=20,interval='1h'):
   c.execute('BEGIN');row=c.execute('SELECT result FROM history_backtest_runs WHERE id=?',(run_id,)).fetchone()
   if not row:raise ValueError('回测结果不存在')
   result=json.loads(row[0]);total=result['bets'];pages=max(1,(total+page_size-1)//page_size);page=max(1,min(page,pages));orders=[json.loads(r[0]) for r in c.execute('SELECT record FROM history_backtest_orders WHERE run_id=? ORDER BY seq DESC LIMIT ? OFFSET ?',(run_id,page_size,(page-1)*page_size))]
-  if interval not in ('1h','4h','1d'):raise ValueError('K线周期须为1h、4h或1d')
+  if interval not in ('1h','4h','1d',*PERIOD_CANDLES):raise ValueError('不支持的K线周期')
   cache=getattr(db,'_income_candle_cache',None)
   if cache is None:cache={};db._income_candle_cache=cache
   key=(run_id,interval)
   candles=cache.get(key)
   if candles is None:
-   candles=income_candles((json.loads(r[0]) for r in c.execute('SELECT record FROM history_backtest_orders WHERE run_id=? ORDER BY seq',(run_id,))),interval,result['coverage']['actual_start'],result['coverage']['actual_end'])
+   records=(json.loads(r[0]) for r in c.execute('SELECT record FROM history_backtest_orders WHERE run_id=? ORDER BY seq',(run_id,)))
+   candles=period_candles(records,interval,result['coverage']['first_id'],result['coverage']['last_id']) if interval in PERIOD_CANDLES else income_candles(records,interval,result['coverage']['actual_start'],result['coverage']['actual_end'])
    if len(cache)>=24:cache.pop(next(iter(cache)),None)
    cache[key]=candles
  return {'result':result,'orders':orders,'total':total,'page':page,'pages':pages,'page_size':page_size,'candles':candles,'candle_interval':interval}

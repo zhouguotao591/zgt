@@ -33,11 +33,31 @@ def attach(c, wire, rows, required, callback_url):
 
 def alert(c, order, status, detail):
     from .notifications import enqueue
-    bot = c.execute('SELECT name FROM robot_bots WHERE id=?', (order['bot_id'],)).fetchone()
-    name = bot[0] if bot else order['name']
-    message = (f"下单异常 · {status}\n会员 {order['recipient_name']} · 机器人 {name}\n"
-               f"订单 PC28-{order['id']} · 第 {order['target_draw']} 期 · {order['message']}")
-    enqueue(c, 'order', f"{order['id']}:{status}", message + ('\n' + detail if detail else ''))
+    bot = c.execute("""SELECT b.name,b.external_bot_key,a.name account_name,a.external_account_id,
+        a.user_id,u.username,p.name platform_name FROM robot_bots b
+        JOIN robot_accounts a ON a.id=b.account_id LEFT JOIN web_users u ON u.id=a.user_id
+        LEFT JOIN robot_platforms p ON p.id=a.platform_id WHERE b.id=?""",(order['bot_id'],)).fetchone()
+    statuses={'rejected':'接收端拒绝','failed':'执行失败','timeout':'执行超时','unconfirmed':'执行状态未确认'}
+    member=bot['username'] if bot and bot['username'] else order['recipient_name']
+    account=(f"{bot['account_name']}（工具账号#{bot['external_account_id']}）" if bot else order['recipient_name'])
+    robot=(f"{bot['name']}（机器人#{bot['external_bot_key']}）" if bot else order['name'])
+    if not bot:
+        try:
+            wire=json.loads(order['request']) if 'request' in order.keys() else {}
+            if not isinstance(wire,dict):wire={}
+        except (TypeError,ValueError):wire={}
+        if wire.get('account_id') is not None:account=f"工具账号#{wire['account_id']}"
+        if wire.get('bot_key') is not None:robot=f"{order['name']}（机器人#{wire['bot_key']}）"
+    amount=order['push_cents']/100 if order['push_cents'] is not None else None
+    message=(f"下单异常 · {statuses.get(status,status)}\n会员：{member}\n下单账号：{account}"
+             +f"\n机器人：{robot}"
+             +(f"\n推送平台：{bot['platform_name']}" if bot and bot['platform_name'] else '')
+             +f"\n订单：PC28-{order['id']} · 第 {order['target_draw']} 期"
+             +f"\n策略：{order['strategy_name'] or order['strategy_id'] or '未记录'}"
+             +f"\n订单内容：{order['message']}"
+             +(f" · 实际推送金额 {amount:g} U" if amount is not None else '')
+             +f"\n异常原因：{detail[:1200] if detail else '未返回具体原因，请核对接收工具执行日志'}")
+    enqueue(c, 'order', f"{order['id']}:{status}", message)
 
 
 def terminal(c, order, status, detail):

@@ -86,6 +86,8 @@ def attributed_orders(rows):
   for evidence in json.loads(row['evidence'] or '[]'):
    keys={p['id'] for p in evidence.get('predictions',[])
          if p.get('id') in BY_ID and p.get('prediction')==row['prediction']}
+   if not keys and evidence.get('rank') and len(evidence.get('algorithm_ids',[]))==1 and evidence.get('votes')=={row['prediction']:1}:
+    keys={key for key in evidence['algorithm_ids'] if key in BY_ID}
    if evidence.get('cutoff_draw')!=row['cutoff_draw']:continue
    record={k:v for k,v in row.items() if k!='evidence'}
    record['credit']=row['stake']+row['pnl']
@@ -160,11 +162,11 @@ class AlgorithmHall:
     if sql.strip():c.execute(sql)
  def snapshot(self):
   with self.lock:
-   draws=self.db.query("""SELECT d.id,d.size,d.parity FROM draws d
+   draws=self.db.query("""SELECT d.id,d.draw_utc,d.a,d.b,d.c,d.total,d.size,d.parity FROM draws d
       WHERE d.draw_utc IS NOT NULL AND julianday(d.draw_utc)<=julianday('now')
       AND d.verification IN ('full_keno','crosschecked_abc')
       AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.draw_id=d.id AND c.resolved=0)
-      ORDER BY d.id DESC LIMIT 51""")[::-1]
+      ORDER BY d.id DESC LIMIT 5051""")[::-1]
    latest_stored=self.db.query('SELECT MAX(id) id FROM draws')[0]['id']
    orders=self.db.query("""SELECT o.id,o.target_draw,o.cutoff_draw,o.direction AS prediction,
       o.stake,o.pnl,o.hit,o.outcome,o.settled,d.draw_utc AS time,
@@ -172,7 +174,7 @@ class AlgorithmHall:
       json_extract(o.strategy_json,'$.evidence') AS evidence
       FROM custom_orders o JOIN draws d ON d.id=o.target_draw
       WHERE o.status='settled' AND o.pnl IS NOT NULL AND o.hit IN (0,1)
-      AND json_extract(o.strategy_json,'$.strategy_type')='algorithm'
+      AND json_extract(o.strategy_json,'$.strategy_type') IN ('algorithm','algorithm_rank')
       AND o.cutoff_draw=o.target_draw-1 AND julianday(o.created)<julianday(d.draw_utc)
       AND julianday(d.draw_utc)<=julianday('now') AND d.verification IN ('full_keno','crosschecked_abc')
       AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.draw_id=o.target_draw AND c.resolved=0)
@@ -185,18 +187,17 @@ class AlgorithmHall:
     cutoff=draws[-1]['id'] if draws else None
     for definition in DEFINITIONS:
      records=by_algorithm[definition['id']]
-     hits=list({r['target_draw']:r['hit'] for r in records}.items())
-     windows={'all':summarize_hits(hits,len(hits))}
+     historical=evaluate(draws,definition,max(HALL_WINDOWS))['records']
+     windows={'all':metrics(historical,max(HALL_WINDOWS))}
      for window in HALL_WINDOWS:
-      recent=[(target,hit) for target,hit in hits if cutoff is not None and cutoff-window<target<=cutoff]
-      windows[str(window)]={**summarize_hits(recent,len(recent)),
+      windows[str(window)]={**metrics(historical,window),
                             'actual':order_totals(recent_orders(records,cutoff,window))}
      choice,reason=predict(draws,definition)
      if cutoff!=latest_stored:choice,reason=None,'最新本地开奖尚未核验'
      pending={'target_draw':cutoff+1 if cutoff is not None else None,'cutoff_draw':cutoff,
               'prediction':choice,'reason':reason}
      self.cached.append({**definition,'metrics':windows,'pending':pending,'records':records,
-                         'actual':order_totals(records)})
+                         'actual':order_totals(records),'history_records':historical})
     self.fingerprint=fingerprint
    return self.cached,self.fingerprint
  def hidden(self):
@@ -204,8 +205,8 @@ class AlgorithmHall:
  def listing(self,user_id,admin=False):
   rows,version=self.snapshot();counts={r['algorithm_id']:r['n'] for r in self.db.query('SELECT algorithm_id,COUNT(*) n FROM algorithm_favorites GROUP BY algorithm_id')};favorites={r['algorithm_id'] for r in self.db.query('SELECT algorithm_id FROM algorithm_favorites WHERE user_id=?',(user_id,))}
   hidden=self.hidden()
-  return {'algorithms':[{**{k:v for k,v in r.items() if k!='records'},'published':r['id'] not in hidden,'favorite':r['id'] in favorites,'favorites':counts.get(r['id'],0)} for r in rows if admin or r['id'] not in hidden],'version':version,'latest_id':rows[0]['pending']['cutoff_draw'] if rows else None,'note':'胜率仅统计开奖前有同向有效预测且实际生成模拟订单、并已结算的期数。历史回放和补单不计入。同一笔订单可归属于多个同向算法，收益不可跨算法相加。'}
- def detail(self,algorithm_id,page=1,page_size=20,admin=False,window=None):
+  return {'algorithms':[{**{k:v for k,v in r.items() if k not in ('records','history_records')},'published':r['id'] not in hidden,'favorite':r['id'] in favorites,'favorites':counts.get(r['id'],0)} for r in rows if admin or r['id'] not in hidden],'version':version,'latest_id':rows[0]['pending']['cutoff_draw'] if rows else None,'note':'历史算法命中率：逐期开奖前仅使用此前已核验数据回放计算，不要求产生订单；缺期或无有效预测不计入命中率。实际下单收益：仅统计已结算的实时算法跟随模拟订单，历史回测及补单不计入；同一订单可能归属多个算法，收益不可跨算法相加。'}
+ def detail(self,algorithm_id,page=1,page_size=20,admin=False,window=None,source='history'):
   if algorithm_id not in BY_ID or (not admin and algorithm_id in self.hidden()):raise ValueError('算法不存在或已下架')
   page=int(page);size=int(page_size)
   if size not in (10,20,50,100):raise ValueError('每页条数须为10、20、50、100')
@@ -213,9 +214,11 @@ class AlgorithmHall:
    window=int(window)
    if window not in HALL_WINDOWS:raise ValueError('统计窗口须为20、100、500、1000、2000或5000期')
   rows,version=self.snapshot();r=next(x for x in rows if x['id']==algorithm_id)
-  selected=recent_orders(r['records'],r['pending']['cutoff_draw'],window) if window is not None else r['records']
+  if source not in ('history','orders'):raise ValueError('明细类型无效')
+  base=r['history_records'] if source=='history' else r['records']
+  selected=recent_orders(base,r['pending']['cutoff_draw'],window) if window is not None else base
   records=list(reversed(selected));total=len(records);pages=max(1,(total+size-1)//size);page=max(1,min(page,pages))
-  return {**{k:v for k,v in r.items() if k!='records'},'records':records[(page-1)*size:page*size],'page':page,'pages':pages,'page_size':size,'total':total,'version':version}
+  return {**{k:v for k,v in r.items() if k not in ('records','history_records')},'records':records[(page-1)*size:page*size],'page':page,'pages':pages,'page_size':size,'total':total,'version':version,'source':source}
  def income(self,algorithm_id,interval='1h',admin=False):
   if algorithm_id not in BY_ID or (not admin and algorithm_id in self.hidden()):raise ValueError('算法不存在或已下架')
   from datetime import datetime
@@ -253,3 +256,35 @@ class AlgorithmHall:
    if enabled:c.execute('INSERT OR IGNORE INTO algorithm_favorites VALUES(?,?,?)',(user_id,key,utcnow()))
    else:c.execute('DELETE FROM algorithm_favorites WHERE user_id=? AND algorithm_id=?',(user_id,key))
   return {'ok':True,'favorite':enabled}
+
+
+class RollingRanking:
+ """Incremental prior-draw hit windows; ties use stable algorithm identifiers."""
+ def __init__(self,axis,window,hidden=()):
+  from collections import deque
+  self.window=window;self.last=None;self.observed=0
+  self.definitions=[d for d in DEFINITIONS if d['axis']==axis and d['id'] not in hidden]
+  self.hits={d['id']:deque() for d in self.definitions}
+  self.totals={d['id']:[0,0] for d in self.definitions}
+ def update(self,rows):
+  for i,row in enumerate(rows):
+   target=row['id']
+   if self.last is not None and target<=self.last:continue
+   if target<rows[-1]['id']-self.window+1:continue
+   for d in self.definitions:
+    h=rows[max(0,i-d['lookback']):i]
+    choice,_=predict(h,d)
+    if not h or h[-1]['id']!=target-1:choice=None
+    q=self.hits[d['id']]
+    hit=None if choice is None else int(choice==row[d['axis']]);q.append((target,hit))
+    if hit is not None:self.totals[d['id']][0]+=hit;self.totals[d['id']][1]+=1
+   self.last=target;self.observed+=1
+  ranked=[]
+  cutoff=rows[-1]['id']-self.window
+  for key,q in self.hits.items():
+   while q and q[0][0]<=cutoff:
+    _,hit=q.popleft()
+    if hit is not None:self.totals[key][0]-=hit;self.totals[key][1]-=1
+   wins,count=self.totals[key]
+   if count:ranked.append((key,wins/count,count))
+  return sorted(ranked,key=lambda r:(-r[1],r[0]))

@@ -68,7 +68,17 @@ def receiver_error(response):
  try:value=json.loads(response.read(4096).decode('utf-8')).get('error','')
  except Exception:return base
  known={'多账号信号必须指定 account_id','信号账号不存在','账号 ID 无效','未找到可用规则','信号匹配多个规则，请传入 bot_key 指定目标机器人 ID','信号时间戳超出5分钟或格式无效','event_id 必填且格式无效','signal_type 格式无效','当前执行已暂停','timestamp 必填（Unix秒）'}
- if value in known or re.fullmatch(r'缺少模板参数: [A-Za-z][A-Za-z0-9_]{0,80}',str(value)):return base+'：'+value
+ known.update({
+  'execution_callback 格式无效',
+  '缺少回调地址',
+  '回调地址须匹配信号源已配置的站点及订单状态路径',
+  '回调地址须匹配信号源已配置的 HTTPS 站点及订单状态路径',
+  '合并订单正文或金额不一致',
+  '订单号、单笔消息或金额格式无效',
+  '同一批次含有重复订单号',
+  '逐笔确认需要开奖截止时间及规则中的成功回复正则',
+ })
+ if isinstance(value,str) and (value in known or re.fullmatch(r'缺少模板参数: [A-Za-z][A-Za-z0-9_]{0,80}',value)):return base+'：'+value
  return base
 
 def text_template(template,fields):

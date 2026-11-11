@@ -143,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
     q=parse_qs(p.query);key=q.get('id',[''])[0]
     if 'backtest' in q:result=s.algorithm_hall.backtest(key,q['backtest'][0],s.cfg['odds'],q.get('interval',['1h'])[0],cutoff=q.get('cutoff',[None])[0])
     elif 'interval' in q:result=s.algorithm_hall.income(key,q['interval'][0])
-    else:result=s.algorithm_hall.detail(key,q.get('page',['1'])[0],q.get('page_size',['20'])[0],window=q.get('window',[None])[0])
+    else:result=s.algorithm_hall.detail(key,q.get('page',['1'])[0],q.get('page_size',['20'])[0],window=q.get('window',[None])[0],source=q.get('source',['history'])[0])
     self.send(200,result);return
    if p.path=='/api/tools':self.send(200,s.tools.run({k:v[0] for k,v in parse_qs(p.query).items()}));return
    if p.path=='/api/strategy-profit-curve':
@@ -155,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
    if p.path=='/api/strategy-defaults':
     from .follow_strategy import defaults
     q=parse_qs(p.query);kind=q.get('kind',['hourly'])[0];axis=q.get('axis',['size'])[0]
-    if kind not in ('hourly','majority','previous','single','algorithm') or axis not in ('size','parity'):raise ValueError('策略类型或维度无效')
+    if kind not in ('hourly','majority','previous','single','algorithm','algorithm_rank') or axis not in ('size','parity'):raise ValueError('策略类型或维度无效')
     self.send(200,defaults(s.cfg,kind,axis));return
    if p.path=='/api/history-backtests':
     from .history_backtest import metadata

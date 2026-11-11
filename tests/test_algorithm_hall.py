@@ -42,7 +42,7 @@ class AlgorithmHallTests(unittest.TestCase):
    self.assertEqual(result['candles'][-1]['close'],150)
   gap=backtest_algorithm([r for r in rows if r['id']!=102],BY_ID['size.follow.1'],5,DEFAULT['odds'],'1h')
   self.assertEqual(gap['orders'],3)
- def test_statistics_and_candles_only_use_attributed_live_orders(self):
+ def test_history_rates_and_attributed_order_income_are_separate(self):
   from pc28.custom_strategy import initialize
   rows=self.rows(240)
   key='size.follow.1'
@@ -65,12 +65,16 @@ class AlgorithmHallTests(unittest.TestCase):
    from pc28.config import DEFAULT
    self.assertEqual(hall.backtest(key,20,DEFAULT['odds'],cutoff=330)['last_draw'],330)
    with self.assertRaises(ValueError):hall.backtest(key,50001,DEFAULT['odds'])
-   detail=hall.detail(key)
+   historical=hall.detail(key)
+   self.assertEqual(historical['source'],'history');self.assertEqual(historical['total'],240)
+   self.assertEqual(historical['metrics']['20']['count'],20)
+   detail=hall.detail(key,source='orders')
    self.assertEqual(detail['total'],3)
-   self.assertEqual((detail['metrics']['all']['wins'],detail['metrics']['all']['count']),(1,2))
-   self.assertEqual(detail['metrics']['100']['count'],1)
+   self.assertEqual(detail['actual']['orders'],3)
+   self.assertEqual(detail['actual']['net'],800)
+   self.assertEqual(detail['metrics']['100']['count'],100)
    for window in (20,100,500,1000,2000,5000):
-    scoped=hall.detail(key,window=window)
+    scoped=hall.detail(key,window=window,source='orders')
     totals=scoped['metrics'][str(window)]['actual']
     self.assertEqual((scoped['total'],totals['orders'],totals['net']),
                      (1,1,-1000) if window<=100 else (3,3,800))
@@ -107,3 +111,26 @@ class AlgorithmHallTests(unittest.TestCase):
    with self.assertRaises(ValueError):hall.favorite(1,{'id':'bad','favorite':True})
    with self.assertRaises(ValueError):hall.detail('size.follow.1',page_size=7)
    self.assertEqual(hall.detail('size.follow.1')['total'],0)
+
+ def test_history_available_without_orders_and_survives_restart(self):
+  from pc28.custom_strategy import initialize
+  from pc28.follow_strategy import rank_signal
+  with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'data') as tmp:
+   db=DB(Path(tmp)/'test.sqlite3');initialize(db)
+   rows=self.rows(160)
+   with db.tx() as c:
+    c.executemany("INSERT INTO draws(id,draw_utc,source_time,a,b,c,total,size,parity,verification,numbers,first_seen,source,raw_hash) VALUES(?,?,?,?,?,?,?,?,?,'full_keno','[]','test','test','test')",((r['id'],r['draw_utc'],r['draw_utc'],r['a'],r['b'],r['c'],r['total'],r['size'],r['parity']) for r in rows))
+   first=AlgorithmHall(db).listing(1)
+   again=AlgorithmHall(DB(Path(tmp)/'test.sqlite3')).listing(1)
+   self.assertEqual(first,again)
+   self.assertTrue(all(a['metrics']['20']['count']==20 for a in first['algorithms']))
+   self.assertTrue(all(a['actual']['orders']==0 and a['actual']['net']==0 for a in first['algorithms']))
+   ranking=sorted([a for a in first['algorithms'] if a['axis']=='size'],key=lambda a:(-a['metrics']['20']['rate'],a['id']))
+   verified=[dict(r,verification='full_keno') for r in rows]
+   _,e,_=rank_signal(verified,{'rank_window':20,'rank_position':1,'axis':'size'},{},260,set())
+   self.assertEqual(e[0]['algorithm_ids'],[ranking[0]['id']])
+   with self.assertRaises(ValueError):AlgorithmHall(db).detail('size.follow.1',source='bad')
+   with db.tx() as c:c.execute("UPDATE draws SET verification='unverified' WHERE id=250")
+   hall=AlgorithmHall(db);history=hall.detail('size.follow.1',window=20)
+   self.assertLess(history['metrics']['20']['count'],20)
+   self.assertEqual(hall.detail('size.follow.1',source='orders')['total'],0)

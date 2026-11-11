@@ -20,7 +20,7 @@ def get(service,path,q,user=None):
  if path=='algorithm-detail':
   if 'backtest' in q:return service.algorithm_hall.backtest(q.get('id'),q['backtest'],service.cfg['odds'],q.get('interval','1h'),admin=True,cutoff=q.get('cutoff'))
   if 'interval' in q:return service.algorithm_hall.income(q.get('id'),q['interval'],admin=True)
-  return service.algorithm_hall.detail(q.get('id'),q.get('page',1),q.get('page_size',20),admin=True,window=q.get('window'))
+  return service.algorithm_hall.detail(q.get('id'),q.get('page',1),q.get('page_size',20),admin=True,window=q.get('window'),source=q.get('source','history'))
  if path=='administrator-members':
   if not is_main_admin(user):raise AuthError('仅 admin 可配置会员可见范围',403,'permission_denied')
   key=int(q.get('id',0));administrator=member_access_target(db,key)

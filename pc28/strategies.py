@@ -8,7 +8,7 @@ IDS=('legacy','parity','size')
 def require_fixed_direction(settings):
  if not isinstance(settings,dict):raise ValueError('策略参数必须是对象')
  if 'fixed' in settings and not isinstance(settings['fixed'],dict):raise ValueError('反转策略参数无效')
- if settings.get('strategy_type') in ('previous','algorithm'):
+ if settings.get('strategy_type') in ('previous','algorithm','algorithm_rank'):
   if settings.get('axis') not in ('size','parity'):raise ValueError('跟随下单类型须选择大小或单双')
   return settings['axis']
  direction=settings.get('fixed',{}).get('direction') if 'fixed' in settings else settings.get('direction')

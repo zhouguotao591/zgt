@@ -7,15 +7,16 @@ from zoneinfo import ZoneInfo
 from .model import money,utcnow,settlement,rounded_ratio,stake_limit_reason
 from .trend_strategy import risk_reason,signal,progress
 from .strategy_capital import sync_capital
-from .algorithm_hall import BY_ID,VERIFIED,predict,ranked_algorithms
-PREVIOUS_AMOUNT_KINDS=('previous','algorithm')
-KINDS=('hourly','majority','previous','single','algorithm');BJ=ZoneInfo('Asia/Shanghai')
+from .algorithm_hall import BY_ID,VERIFIED,predict,ranked_algorithms,RollingRanking
+PREVIOUS_AMOUNT_KINDS=('previous','algorithm','algorithm_rank')
+KINDS=('hourly','majority','previous','single','algorithm','algorithm_rank');BJ=ZoneInfo('Asia/Shanghai')
 def defaults(cfg,kind,axis='size'):
  value={'strategy_type':kind,'axis':axis,'direction':None,'win_limit':5 if kind=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0,'observe_hours':2,'hour_difference':5,'follow_hours':2,'lookback':20,'base_cents':50000,'loss_increment_cents':10000,'multiplier_hundredths':200,'stake_mode':'fixed' if kind=='hourly' else 'additive','max_losses':3,'initial_balance':cfg['simulation']['initial_balance'],**{k:cfg['simulation'][k] for k in ('daily_loss_limit','max_drawdown','max_stake')}}
  if kind=='single':value.update(direction='单',axis='parity',stake_mode='fixed',win_limit=0,base_cents=cfg['simulation']['fixed']['base_cents'])
  if kind=='single':value.update(stake_mode='adjust',win_decrement_cents=10000,stake_floor='market',max_increase_steps=0,max_decrease_steps=0)
  if kind in PREVIOUS_AMOUNT_KINDS:value.update(win_decrement_cents=10000,stake_floor='market',max_stake=20000,win_limit=0,max_increase_steps=0,max_decrease_steps=0)
  if kind in (*PREVIOUS_AMOUNT_KINDS,'single'):value.update(amount_bands.ZERO)
+ if kind=='algorithm_rank':value.update(rank_position=1,rank_window=20)
  if kind=='algorithm':value.update(algorithm_follow_draws=20,algorithm_difference_limit=0,algorithm_cooldown_rounds=0)
  return value
 
@@ -44,6 +45,20 @@ def algorithm_signal(history,settings,state,target,hidden):
                algorithm_difference=0,attempt=0,cycle=state.get('cycle',0)+1)
  reason='近20期胜率前五投票：'+'，'.join(f'{side}{count}票' for side,count in votes)+'，跟随'+direction
  return direction,[{'algorithm_ids':keys,'predictions':predictions,'votes':dict(counts),'cutoff_draw':target-1,'reason':reason}],reason
+
+def rank_signal(history,settings,state,target,hidden,ranker=None):
+ rows=[r for r in history if r['id']<target and r.get('verification') in VERIFIED]
+ if not rows or rows[-1]['id']!=target-1:return None,[],'排名观察窗口缺期或尚未核验'
+ if (ranker.observed if ranker else len(rows))<settings['rank_window']:return None,[],'排名观察窗口预热'
+ ranking=(ranker or RollingRanking(settings['axis'],settings['rank_window'],hidden)).update(rows)
+ position=settings['rank_position']
+ if len(ranking)<position:return None,[],'有效算法数量不足所选排名'
+ key,rate,count=ranking[position-1]
+ direction,why=predict(rows,BY_ID[key])
+ if not direction:return None,[],'所选排名算法：'+why
+ if not state.get('cycle'):state['cycle']=1
+ reason=f"近{settings['rank_window']}期胜率排名第{position}名：{BY_ID[key]['name']}，胜率{rate:.2%}（有效{count}期）"
+ return direction,[{'algorithm_ids':[key],'predictions':[{'id':key,'prediction':direction}],'votes':{direction:1},'rank':position,'rank_window':settings['rank_window'],'rate':rate,'cutoff_draw':target-1,'reason':reason}],reason
 
 def settle_algorithm_round(state,settings,outcome,target):
  difference=state.get('algorithm_difference',0)+int(outcome=='win')-int(outcome=='loss')
@@ -92,6 +107,10 @@ def validate(cfg,value):
   if value.get('direction') not in ('单','双','大','小'):raise ValueError('单边策略只能选择单、双、大、小中的一个方向')
   if value.get('axis')!=('size' if value['direction'] in ('大','小') else 'parity'):raise ValueError('开单方向与判断维度不一致')
  if value['strategy_type'] not in KINDS or value['axis'] not in ('size','parity'):raise ValueError('策略类型或维度无效')
+ if value['strategy_type']=='algorithm_rank':
+  if value['direction'] is not None:raise ValueError('算法排名跟随只选择大小或单双类型')
+  for field,maximum in [('rank_position',14),('rank_window',10000)]:
+   if type(value[field]) is not int or not 1<=value[field]<=maximum:raise ValueError('排名须为1—14，排名统计期数须为1—10000')
  if value['strategy_type']=='algorithm':
   if value['direction'] is not None:raise ValueError('算法跟随只选择大小或单双类型')
   for field,minimum,maximum in [('algorithm_follow_draws',1,1000),('algorithm_difference_limit',0,1000),('algorithm_cooldown_rounds',0,1000)]:
@@ -203,12 +222,12 @@ def tick_one(c,a,history,cfg,now):
  if c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone():reason='等待上一单结算'
  if settings['strategy_type']=='single':direction=settings['direction'];evidence=[{'cutoff_draw':latest['id'],'fixed_direction':direction}]
  elif settings['strategy_type']=='previous':direction=latest[settings['axis']];evidence=[{'cutoff_draw':latest['id'],'direction':direction}]
- elif settings['strategy_type']=='algorithm':
+ elif settings['strategy_type'] in ('algorithm','algorithm_rank'):
   if not reason:
    hidden={r[0] for r in c.execute("SELECT item_id FROM public_visibility WHERE kind='algorithm' AND published=0")}
    algorithm_state=state.copy()
    verified_time=[r for r in history if r['draw_utc'] and datetime.fromisoformat(r['draw_utc'])<=now]
-   direction,evidence,why=algorithm_signal(verified_time,settings,algorithm_state,target,hidden)
+   direction,evidence,why=(rank_signal if settings['strategy_type']=='algorithm_rank' else algorithm_signal)(verified_time,settings,algorithm_state,target,hidden)
    if not direction:reason=why
  elif settings['strategy_type']=='majority':
   previous=c.execute('SELECT direction FROM custom_orders WHERE strategy=? ORDER BY target_draw DESC LIMIT 1',(key,)).fetchone();choice=signal(history,settings['axis'],previous[0] if previous else None,settings['lookback'])
@@ -237,12 +256,13 @@ def tick_one(c,a,history,cfg,now):
  cycle=state.setdefault('cycle',1);step=state.get('attempt',0)+1 if settings['strategy_type'] in ('hourly',*PREVIOUS_AMOUNT_KINDS) else state.get('losses',0)+1
  plan={'strategy_type':settings['strategy_type'],'settings':settings,'evidence':evidence,'follow_start':state.get('follow_start'),'follow_end':state.get('follow_end')}
  cur=c.execute("INSERT INTO custom_orders(strategy,target_draw,cutoff_draw,created,direction,ratio,stake,status,cycle,step,strategy_json,odds_json,restart_policy) VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?)",(key,target,latest['id'],utcnow(),direction,ratio,stake,cycle,step,json.dumps(plan,ensure_ascii=False),json.dumps(cfg['odds']),'follow'))
- balance=a['balance']-stake;c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(key,cur.lastrowid,utcnow(),'stake',-stake,balance));c.execute('UPDATE custom_strategies SET balance=?,state=? WHERE id=?',(balance,json.dumps(state,ensure_ascii=False),key));c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(key,target,utcnow(),'order',evidence[0]['reason'] if settings['strategy_type']=='algorithm' else '单边固定买'+direction if settings['strategy_type']=='single' else '跟随上一期'+direction if settings['strategy_type']=='previous' else '连续小时少数方向一致，进入跟随期' if settings['strategy_type']=='hourly' else '占优跟随；持平沿用上一笔方向'))
+ balance=a['balance']-stake;c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(key,cur.lastrowid,utcnow(),'stake',-stake,balance));c.execute('UPDATE custom_strategies SET balance=?,state=? WHERE id=?',(balance,json.dumps(state,ensure_ascii=False),key));c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(key,target,utcnow(),'order',evidence[0]['reason'] if settings['strategy_type'] in ('algorithm','algorithm_rank') else '单边固定买'+direction if settings['strategy_type']=='single' else '跟随上一期'+direction if settings['strategy_type']=='previous' else '连续小时少数方向一致，进入跟随期' if settings['strategy_type']=='hourly' else '占优跟随；持平沿用上一笔方向'))
 
 def rule_text(s):return _rule_text(s)+(amount_bands.description(s) if adjusts_amount(s) else '')
 
 def _rule_text(s):
  axis='大小' if s['axis']=='size' else '单双'
+ if s['strategy_type']=='algorithm_rank':return f"每期按近{s['rank_window']}期胜率重排已上架{axis}算法，跟随第{s['rank_position']}名；同率按算法编号排序；基础{s['base_cents']/100:g}U，赢减{s['win_decrement_cents']/100:g}U，亏加{s['loss_increment_cents']/100:g}U"
  if s['strategy_type']=='algorithm':
   return (f"已上架{axis}算法按近20期胜率选前五，跟随预测票数较多的方向，平票跳过，每{s['algorithm_follow_draws']}期重新排名；"
           f"本轮净胜或净负达到{s['algorithm_difference_limit']}单时停{s['algorithm_cooldown_rounds']}轮（阈值0关闭）；"
