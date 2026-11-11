@@ -9,7 +9,7 @@ class AlgorithmHallTests(unittest.TestCase):
   t=datetime(2026,1,1,tzinfo=timezone.utc)
   return [{'id':100+i,'draw_utc':(t+timedelta(seconds=i*210)).isoformat(),'a':1,'b':2,'c':3,'total':6,'size':'大' if i%3 else '小','parity':'单' if i%2 else '双'} for i in range(count)]
  def test_only_two_axes_and_known_methods(self):
-  self.assertEqual(len(DEFINITIONS),28);self.assertEqual({d['axis'] for d in DEFINITIONS},{'size','parity'})
+  self.assertEqual(len(DEFINITIONS),310);self.assertEqual({d['axis'] for d in DEFINITIONS},{'size','parity'})
   history=[{**r,'size':'大'} for r in self.rows(51)]
   self.assertEqual(predict(history,BY_ID['size.minority.20'])[0],'小');self.assertEqual(predict(history,BY_ID['size.majority.20'])[0],'大')
  def test_no_target_or_future_leakage(self):
@@ -104,7 +104,7 @@ class AlgorithmHallTests(unittest.TestCase):
  def test_empty_and_favorite_isolation_idempotency(self):
   with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'data') as tmp:
    from pc28.custom_strategy import initialize
-   db=DB(Path(tmp)/'test.sqlite3');initialize(db);hall=AlgorithmHall(db);listing=hall.listing(1);self.assertEqual(len(listing['algorithms']),28);self.assertTrue(all(r['metrics']['20']['rate'] is None for r in listing['algorithms']))
+   db=DB(Path(tmp)/'test.sqlite3');initialize(db);hall=AlgorithmHall(db);listing=hall.listing(1);self.assertEqual(len(listing['algorithms']),310);self.assertTrue(all(r['metrics']['20']['rate'] is None for r in listing['algorithms']))
    body={'id':'size.follow.1','favorite':True};hall.favorite(1,body);hall.favorite(1,body)
    row=next(r for r in hall.listing(1)['algorithms'] if r['id']==body['id']);other=next(r for r in hall.listing(2)['algorithms'] if r['id']==body['id'])
    self.assertTrue(row['favorite']);self.assertFalse(other['favorite']);self.assertEqual(row['favorites'],1)

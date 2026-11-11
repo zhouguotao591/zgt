@@ -46,3 +46,14 @@ class DynamicReversalTests(unittest.TestCase):
   b,orders=history_replay(rows,snapshot)
   self.assertEqual(a['net'],b['net']);self.assertEqual([(o['draw'],o['direction']) for o in a['orders']],[(o['target_draw'],o['direction']) for o in orders]);self.assertEqual({o['direction'] for o in orders},{'大','小'})
 
+
+ def test_reversal_enable_gate_accepts_comparison_axes_only_for_reversal(self):
+  from pc28.strategies import require_fixed_direction
+  for direction,axis in [('大小','size'),('单双','parity')]:
+   self.assertEqual(require_fixed_direction({'fixed':{'direction':direction}}),axis)
+   with self.assertRaises(ValueError):require_fixed_direction({'strategy_type':'majority','direction':direction})
+ def test_editor_exposes_two_comparison_axes(self):
+  import re
+  html=(Path(__file__).resolve().parent.parent/'web/index.html').read_text('utf-8')
+  select=re.search(r'<select id="se-direction"[^>]*>(.*?)</select>',html).group(1)
+  self.assertEqual(re.findall(r'value="([^"]+)"',select),['大小','单双'])

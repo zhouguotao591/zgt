@@ -107,7 +107,7 @@ def tick(db,cfg,now=None):
    c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
    c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?),state=? WHERE id=?',(balance,balance,json.dumps(st,ensure_ascii=False),o['strategy']))
  rank_windows=[json.loads(r['settings']).get('rank_window',0) for r in db.query('SELECT settings FROM custom_strategies WHERE enabled=1')]
- history=db.tail(max(1001,max(rank_windows,default=0)+51))
+ history=db.tail(max(1001,max(rank_windows,default=0)+56))
  if not history:return
  latest=history[-1];target=latest['id']+1
  with db.tx() as c:

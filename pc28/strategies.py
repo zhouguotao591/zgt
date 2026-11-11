@@ -12,7 +12,8 @@ def require_fixed_direction(settings):
   if settings.get('axis') not in ('size','parity'):raise ValueError('跟随下单类型须选择大小或单双')
   return settings['axis']
  direction=settings.get('fixed',{}).get('direction') if 'fixed' in settings else settings.get('direction')
- if direction not in ('大','小','单','双'):raise ValueError('请编辑参数，从大、小、单、双中选择一个开单方向后保存')
+ if 'fixed' in settings and direction in ('大小','单双'):return 'size' if direction=='大小' else 'parity'
+ if direction not in ('大','小','单','双'):raise ValueError('请编辑参数选择有效的开单方向；反转策略请选择大小或单双')
  return direction
 
 def require_selected_direction(service,key):

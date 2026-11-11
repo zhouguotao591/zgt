@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from .model import money,utcnow,settlement,rounded_ratio,stake_limit_reason
 from .trend_strategy import risk_reason,signal,progress
 from .strategy_capital import sync_capital
-from .algorithm_hall import BY_ID,VERIFIED,predict,ranked_algorithms,RollingRanking
+from .algorithm_hall import BY_ID,VERIFIED,predict,ranked_algorithms,RollingRanking,ALGORITHMS_PER_AXIS
 PREVIOUS_AMOUNT_KINDS=('previous','algorithm','algorithm_rank')
 KINDS=('hourly','majority','previous','single','algorithm','algorithm_rank');BJ=ZoneInfo('Asia/Shanghai')
 def defaults(cfg,kind,axis='size'):
@@ -109,8 +109,8 @@ def validate(cfg,value):
  if value['strategy_type'] not in KINDS or value['axis'] not in ('size','parity'):raise ValueError('策略类型或维度无效')
  if value['strategy_type']=='algorithm_rank':
   if value['direction'] is not None:raise ValueError('算法排名跟随只选择大小或单双类型')
-  for field,maximum in [('rank_position',14),('rank_window',10000)]:
-   if type(value[field]) is not int or not 1<=value[field]<=maximum:raise ValueError('排名须为1—14，排名统计期数须为1—10000')
+  for field,maximum in [('rank_position',ALGORITHMS_PER_AXIS),('rank_window',10000)]:
+   if type(value[field]) is not int or not 1<=value[field]<=maximum:raise ValueError(f'排名须为1—{ALGORITHMS_PER_AXIS}，排名统计期数须为1—10000')
  if value['strategy_type']=='algorithm':
   if value['direction'] is not None:raise ValueError('算法跟随只选择大小或单双类型')
   for field,minimum,maximum in [('algorithm_follow_draws',1,1000),('algorithm_difference_limit',0,1000),('algorithm_cooldown_rounds',0,1000)]:

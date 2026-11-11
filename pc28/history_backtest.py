@@ -130,7 +130,7 @@ def replay(rows,snapshot,on_progress=None):
   time=r['_time'];utcday=time.astimezone(timezone.utc).date().isoformat()
   if day!=utcday:day=utcday;daily=0
   if not i:skips['观察窗口预热']+=1;continue
-  history=rows[max(0,i-(52 if kind=='algorithm_rank' else 1001)):i];prev=history[-1];target=r['id'];decision=time-timedelta(microseconds=1)
+  history=rows[max(0,i-(57 if kind=='algorithm_rank' else 1001)):i];prev=history[-1];target=r['id'];decision=time-timedelta(microseconds=1)
   if ranker is not None:ranker.update([v for v in history if v.get('verification') in VERIFIED])
   rest_reason=maintenance.block_reason(prev,decision,snapshot.get('maintenance_guard',True),time)
   if rest_reason:

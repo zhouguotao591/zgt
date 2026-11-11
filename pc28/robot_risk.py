@@ -11,6 +11,18 @@ CREATE INDEX IF NOT EXISTS robot_risk_holds_bot ON robot_risk_holds(bot_id);
 """
 
 
+def migrate(c):
+    fields = {r[1] for r in c.execute('PRAGMA table_info(robot_risk)')}
+    for name, definition in (
+        ('calibration_amount', 'INTEGER'), ('calibration_baseline', 'INTEGER'),
+        ('calibration_pending', 'INTEGER NOT NULL DEFAULT 0'),
+        ('calibrated_at', "TEXT NOT NULL DEFAULT ''"),
+        ('fixed_stop_balance', 'INTEGER NOT NULL DEFAULT 0'),
+    ):
+        if name not in fields:
+            c.execute(f'ALTER TABLE robot_risk ADD COLUMN {name} {definition}')
+
+
 def config_values(body):
     from .robot_accounts import integer
     capital = integer(body.get('capital'), '配资（分）', 2, 1000000000000)
@@ -29,11 +41,14 @@ def state(c, bot_id):
     rule = c.execute('SELECT * FROM robot_risk WHERE bot_id=?', (bot_id,)).fetchone()
     if not rule:
         return None
+    calibrated = rule['calibration_amount'] is not None
+    risk_capital = rule['calibration_amount'] + rule['calibration_pending'] if calibrated else rule['capital']
+    ledger_start = rule['calibration_baseline'] if calibrated else rule['baseline']
     net = peak = 0
     for row in c.execute("""SELECT o.pnl FROM member_orders o
         JOIN member_cash_ledger l ON l.order_id=o.id AND l.kind='settle'
         WHERE o.bot_id=? AND o.status='settled' AND l.id>? ORDER BY l.id""",
-        (bot_id, rule['baseline'])):
+        (bot_id, ledger_start)):
         net += row[0]
         peak = max(peak, net)
     pending = c.execute("SELECT COALESCE(SUM(stake),0) FROM member_orders WHERE bot_id=? AND status='pending'",
@@ -45,18 +60,22 @@ def state(c, bot_id):
         ORDER BY h.outbox_id""", (bot_id,))]
     limit = rule['loss_limit']
     if rule['loss_mode'] == 'percent':
-        limit = rule['capital'] * limit // 10000
-    floor = -min(limit, rule['capital'] // 2)
+        limit = risk_capital * limit // 10000
+    floor = -min(limit, risk_capital // 2)
     if peak >= rule['profit_target']:
         floor = max(floor, peak - peak * rule['trailing_bps'] // 10000)
+    funds = risk_capital + net
     return {**dict(rule), 'net': net, 'peak': peak, 'floor': floor,
+            'risk_capital': risk_capital, 'funds': funds, 'available': funds-pending-held,
             'pending': pending, 'held': held, 'uncertain': len(unresolved), 'unresolved': unresolved}
 
 
 def check(c, bot_id):
     risk = state(c, bot_id)
     if risk and not risk['paused']:
-        reason = ('触及配资50%强制止损线' if risk['net'] <= -(risk['capital'] // 2)
+        reason = (f"可用金额 {risk['available']/100:.2f} U 低于固定止损金额 {risk['fixed_stop_balance']/100:.2f} U"
+                  if risk['fixed_stop_balance'] > 0 and risk['available'] < risk['fixed_stop_balance']
+                  else '触及配资50%强制止损线' if risk['net'] <= -(risk['risk_capital'] // 2)
                   else '触及移动止损线' if risk['net'] <= risk['floor'] and risk['peak'] >= risk['profit_target']
                   else '触及固定止损线' if risk['net'] <= risk['floor'] else '')
         if reason:
@@ -71,15 +90,33 @@ def baseline(c):
 
 def save(c, bot_id, body):
     values = config_values(body)
+    from .robot_accounts import integer
+    fixed_stop = integer(body.get('fixed_stop_balance', 0), '固定止损金额（分）', 0, 1000000000000)
+    calibration = body.get('calibration_amount')
+    if calibration is not None:
+        calibration = integer(calibration, '校准可用金额（分）', 0, 1000000000000)
     c.execute("""INSERT INTO robot_risk(bot_id,capital,loss_mode,loss_limit,profit_target,trailing_bps,baseline)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(bot_id) DO UPDATE SET capital=excluded.capital,
         loss_mode=excluded.loss_mode,loss_limit=excluded.loss_limit,profit_target=excluded.profit_target,
         trailing_bps=excluded.trailing_bps""", (bot_id, *values, baseline(c)))
+    # Omission preserves a previous absolute balance floor for older callers.
+    if 'fixed_stop_balance' in body:
+        c.execute('UPDATE robot_risk SET fixed_stop_balance=? WHERE bot_id=?', (fixed_stop, bot_id))
+    if calibration is not None:
+        calibrate(c, bot_id, calibration)
     # Capture attempts already in progress when the policy is first configured.
     c.execute("""INSERT OR IGNORE INTO robot_risk_holds
         SELECT id,bot_id,push_cents FROM robot_outbox WHERE bot_id=? AND is_test=0
         AND status IN ('sending','retry') AND attempts>0 AND push_cents>0""", (bot_id,))
     return check(c, bot_id)
+
+
+def calibrate(c, bot_id, available):
+    """The operator enters cash AFTER known open bets have been deducted."""
+    from .model import utcnow
+    pending = c.execute("SELECT COALESCE(SUM(stake),0) FROM member_orders WHERE bot_id=? AND status='pending'", (bot_id,)).fetchone()[0]
+    c.execute('UPDATE robot_risk SET calibration_amount=?,calibration_pending=?,calibration_baseline=?,calibrated_at=? WHERE bot_id=?',
+              (available, pending, baseline(c), utcnow(), bot_id))
 
 
 def admit(c, bot_id, members):
@@ -94,6 +131,8 @@ def admit(c, bot_id, members):
         return '无法核验机器人批次金额'
     extra = sum(row['push_cents'] for row in members if not c.execute(
         'SELECT 1 FROM robot_risk_holds WHERE outbox_id=?', (row['id'],)).fetchone())
+    if risk['fixed_stop_balance'] > 0 and risk['available'] - extra < risk['fixed_stop_balance']:
+        return '本批订单可能突破固定余额止损线'
     if risk['net'] - risk['pending'] - risk['held'] - extra < risk['floor']:
         return '本批订单可能突破机器人止损线'
     c.executemany('INSERT OR IGNORE INTO robot_risk_holds VALUES(?,?,?)',
@@ -109,9 +148,19 @@ def resume(c, bot_id, reset):
         raise ValueError('请选择是否重新计算盈亏')
     if risk['uncertain']:
         raise ValueError('请先核对发送状态不明的订单')
+    if risk['fixed_stop_balance'] > 0 and risk['available'] < risk['fixed_stop_balance']:
+        raise ValueError('可用金额仍低于固定止损金额，请先校准实际资金或调整止损金额')
+    if risk['available'] < 0:
+        raise ValueError('可用金额不足，请先等待订单结算或校准实际资金')
     if reset:
-        c.execute('UPDATE robot_risk SET baseline=? WHERE bot_id=?', (baseline(c), bot_id))
+        if risk['calibration_amount'] is not None:
+            # Resetting relative P&L must not replace calibrated money with nominal capital.
+            calibrate(c, bot_id, risk['funds'] - risk['pending'])
+        else:
+            c.execute('UPDATE robot_risk SET baseline=? WHERE bot_id=?', (baseline(c), bot_id))
         risk = state(c, bot_id)
+    if risk['fixed_stop_balance'] > 0 and risk['available'] < risk['fixed_stop_balance']:
+        raise ValueError('可用金额仍低于固定止损金额，请先校准实际资金或调整止损金额')
     if risk['net'] - risk['pending'] - risk['held'] <= risk['floor']:
         raise ValueError('仍处于止损线，请等待结算或选择重新计算盈亏')
     c.execute("UPDATE robot_risk SET paused='' WHERE bot_id=?", (bot_id,))

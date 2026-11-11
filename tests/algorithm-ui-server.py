@@ -12,6 +12,9 @@ with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'dat
  with s.db.tx() as c:uid=c.execute("INSERT INTO web_users(username,password_hash,role,created) VALUES(?,?,?,?)",('hall_test_member',hash_password(secrets.token_urlsafe(24)),'member',utcnow())).lastrowid
  row,cookie=s.auth.create_session(uid)
  with s.db.tx() as c:aid=c.execute("INSERT INTO web_users(username,password_hash,role,created) VALUES(?,?,?,?)",('hall_test_admin',hash_password(secrets.token_urlsafe(24)),'admin',utcnow())).lastrowid
+ with s.db.tx() as c:
+  c.execute('INSERT OR IGNORE INTO web_admin_owners VALUES(?)',(aid,))
+  c.execute('INSERT OR IGNORE INTO web_member_access VALUES(?,?)',(aid,uid))
  with s.db.tx() as c:_,admin_cookie=s.auth.write_session(c,aid,scope='admin',verified=True)
  admin_entry=secrets.token_urlsafe(20);entry=secrets.token_urlsafe(20);now=datetime.now(timezone.utc)-timedelta(seconds=12*210)
  s.db.import_records([{'id':1000+i,'time':(now-timedelta(seconds=(239-i)*210)).isoformat(),'numbers':list(range(1,21)) if i%3 else list(range(4,24))} for i in range(240)],'test')
@@ -67,6 +70,9 @@ with tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'dat
    if self.path=='/fixture-admin-entry/'+admin_entry and self.check_host():
     self.send_response(303);self.send_header('Set-Cookie',admin_cookie);self.send_header('Location','/admin');self.end_headers();return
    super().do_GET()
+ if '--library-backtests' in sys.argv:
+  from pc28.algorithm_library import run as library_backtests
+  library_backtests(root)
  server=LocalServer(s);server.RequestHandlerClass=FixtureHandler;s.start()
  state={'root':str(root),'admin_entry':'http://pc28-next.localhost:18039/fixture-admin-entry/'+admin_entry,'entry':'http://pc28-next.localhost:18039/fixture-entry/'+entry,'control':(root/'data/local-control-token.txt').read_text()};(Path(__file__).resolve().parent.parent/'data/algorithm-ui-state.json').write_text(json.dumps(state))
  print(state['entry'],flush=True);print(state['admin_entry'],flush=True)
