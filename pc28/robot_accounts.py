@@ -34,6 +34,7 @@ class Accounts:
   with self.service.lock,self.db.tx() as c:
    for sql in (SCHEMA+robot_risk.SCHEMA).split(';'):
     if sql.strip():c.execute(sql)
+   robot_risk.migrate(c)
    subscription_schema=c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='robot_subscriptions'").fetchone()[0]
    if 'UNIQUE(account_id,strategy_id)' in subscription_schema:
     c.execute('ALTER TABLE robot_subscriptions RENAME TO robot_subscriptions_v1')

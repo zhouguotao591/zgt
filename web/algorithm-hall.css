@@ -9,3 +9,6 @@
 #algo-income-dialog .hb-k-periods{flex-wrap:wrap}
 
 .algo-backtest-controls{display:flex;flex-wrap:wrap;align-items:end;gap:10px;margin:12px 0}.algo-backtest-controls label{display:grid;gap:6px}.algo-backtest-controls input{width:135px}#algo-backtest-dialog .hb-k-periods{flex-wrap:wrap}#algo-backtest-directions table{min-width:0}
+
+.algo-library-backtest{padding:12px;border:1px solid #dce8f4;border-radius:10px;margin:12px 0;background:#f7faff}.algo-library-backtest>strong{font-size:13px;color:#315b85}.algo-library-backtest small{display:block;color:#71839a;line-height:1.6}.algo-library-backtest .algo-streaks{margin:8px 0;gap:8px}.algo-library-backtest b{font-size:14px;overflow-wrap:anywhere}
+.algo-library-backtest .algo-streaks{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:12px}.algo-library-backtest .algo-streaks span{white-space:normal;line-height:1.5}.algo-library-backtest .algo-streaks b{display:block;line-height:1.5}

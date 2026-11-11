@@ -8,10 +8,10 @@ from .model import utcnow
 PAGES={'admin-overview':'后台总览','strategies':'策略管理','algorithm-hall':'算法大厅','simulation':'模拟账户','history-backtest':'历史回测','admin-ai':'AI概率研究','admin-users':'会员管理','admin-member-orders':'会员订单明细','admin-invites':'邀请码管理','admin-site':'站点设置','admin-ops':'采集与数据','admin-robot':'机器人推送','admin-audit':'安全审计','admin-administrators':'管理员管理','admin-permissions':'权限管理'}
 # key, page, label, controls. Read-only navigation/filter/paging belongs to page access.
 ACTIONS=[
- ('strategy.publish','strategies','上下架策略','[data-strategy-publish]'),('algorithm.publish','algorithm-hall','上下架算法','[data-algo-publish]'),
+ ('strategy.publish','strategies','上下架策略','[data-strategy-publish],#strategy-bulk-publish,#strategy-bulk-unpublish'),('algorithm.publish','algorithm-hall','上下架算法','[data-algo-publish]'),
  ('strategy.add.reversal','strategies','添加反转策略','#strategy-add'),('strategy.add.hourly','strategies','添加小时策略','#strategy-add-hourly'),('strategy.add.majority','strategies','添加占优策略','#strategy-add-majority'),('strategy.add.single','strategies','添加单边策略','#strategy-add-single'),('strategy.add.previous','strategies','添加上期策略','#strategy-add-previous'),('strategy.add.algorithm','strategies','添加算法跟随策略','#strategy-add-algorithm'),
  ('strategy.add.algorithm_rank','strategies','算法排名自动跟随策略','#strategy-add-rank'),
- ('strategy.edit','strategies','编辑策略参数','[data-strategy-edit]'),('strategy.control','strategies','启用 / 停用策略','[data-strategy-control]'),('strategy.delete','strategies','删除策略','[data-strategy-delete],#strategy-delete-save'),('strategy.backtest','strategies','策略列表发起回测','[data-strategy-backtest]'),
+ ('strategy.edit','strategies','编辑策略参数','[data-strategy-edit]'),('strategy.control','strategies','启用 / 停用策略','[data-strategy-control],#strategy-bulk-disable'),('strategy.delete','strategies','删除策略','[data-strategy-delete],#strategy-delete-save,#strategy-bulk-delete'),('strategy.backtest','strategies','策略列表发起回测','[data-strategy-backtest]'),
  ('simulation.profit','simulation','查看收益曲线','[data-profit-curve],#profit-refresh,#profit-backfill'),
  ('backtest.chart','history-backtest','切换回测图表周期','[data-k-interval]'),
  ('backtest.run','history-backtest','开始历史回测','#hb-start'),('backtest.export','history-backtest','下载回测文件','#hb-csv,#hb-json'),('ai.train','admin-ai','训练模型','#ai-admin-train'),
@@ -50,7 +50,7 @@ class _Controls(HTMLParser):
 @lru_cache(maxsize=1)
 def catalog():
  base=[{'key':'page.'+p,'page':p,'label':'访问页面 / 读取数据','selector':'[data-tab="'+p+'"]'} for p in PAGES]+[{'key':k,'page':p,'label':label,'selector':selector} for k,p,label,selector in ACTIONS]
- covered={x for r in base for x in re.findall(r'#([A-Za-z0-9_-]+)',r['selector'])};parser=_Controls(covered)
+ covered={x for r in base for x in re.findall(r'#([A-Za-z0-9_-]+)',r['selector'])};covered.update({'strategy-select-all','strategy-select-clear'});parser=_Controls(covered)
  for name in ('index.html','admin-sections.html','robot-accounts-section.html','ai-admin-section.html'):
   file=Path(__file__).resolve().parent.parent/'web'/name
   if file.exists():parser.feed(file.read_text(encoding='utf8'))

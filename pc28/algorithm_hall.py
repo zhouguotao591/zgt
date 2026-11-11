@@ -10,16 +10,19 @@ MAX_BACKTEST_DRAWS=50000
 PAPER_INITIAL=1000000
 PAPER_BASE=10000
 SCHEMA="""
+CREATE TABLE IF NOT EXISTS algorithm_library_backtests(algorithm_id TEXT PRIMARY KEY,created TEXT NOT NULL,result TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS algorithm_favorites(user_id INTEGER NOT NULL,algorithm_id TEXT NOT NULL,created TEXT NOT NULL,PRIMARY KEY(user_id,algorithm_id));
 """
 
 def definitions():
  result=[]
  for axis,title in [('size','大小'),('parity','单双')]:
-  for kind,n,name,rule in [('follow',1,'上期跟随','使用上期结果作为下一期判断。'),('reverse',1,'上期反转','使用与上期相反的结果作为下一期判断。'),*[(kind,n,f'近{n}期'+('占优跟随' if kind=='majority' else '少数反转'),f'统计此前{n}期次数，'+('选择较多的一方' if kind=='majority' else '选择较少的一方')+'；持平时跟随上期结果。') for n in (5,10,20,30,50) for kind in ('majority','minority')],*[("transition",n,f'近{n}期转移跟随',f'观察此前{n}次相邻结果的转移，选择当前结果之后历史出现较多的一方；无样本或持平时跟随上期。') for n in (20,50)]]:
+  for kind,n,name,rule in [('follow',1,'上期跟随','使用上期结果作为下一期判断。'),('reverse',1,'上期反转','使用与上期相反的结果作为下一期判断。'),*[(kind,n,f'近{n}期'+('占优跟随' if kind=='majority' else '少数反转'),f'统计此前{n}期次数，'+('选择较多的一方' if kind=='majority' else '选择较少的一方')+'；持平时跟随上期结果。') for n in range(5,56) for kind in ('majority','minority')],*[("transition",n,f'近{n}期转移跟随',f'观察此前{n}次相邻结果的转移，选择当前结果之后历史出现较多的一方；无样本或持平时跟随上期。') for n in range(5,56)]]:
    result.append({'id':f'{axis}.{kind}.{n}','axis':axis,'category':title,'name':title+' · '+name,'kind':kind,'lookback':n+1 if kind=='transition' else n,'rule':rule,'version':'local-formula-v1'})
  return result
 DEFINITIONS=definitions();BY_ID={r['id']:r for r in DEFINITIONS}
+MAX_ALGORITHM_LOOKBACK=max(d['lookback'] for d in DEFINITIONS)
+ALGORITHMS_PER_AXIS=sum(d['axis']=='size' for d in DEFINITIONS)
 
 def predict(history,definition):
  n=definition['lookback'];axis=definition['axis']
@@ -166,7 +169,7 @@ class AlgorithmHall:
       WHERE d.draw_utc IS NOT NULL AND julianday(d.draw_utc)<=julianday('now')
       AND d.verification IN ('full_keno','crosschecked_abc')
       AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.draw_id=d.id AND c.resolved=0)
-      ORDER BY d.id DESC LIMIT 5051""")[::-1]
+      ORDER BY d.id DESC LIMIT 5056""")[::-1]
    latest_stored=self.db.query('SELECT MAX(id) id FROM draws')[0]['id']
    orders=self.db.query("""SELECT o.id,o.target_draw,o.cutoff_draw,o.direction AS prediction,
       o.stake,o.pnl,o.hit,o.outcome,o.settled,d.draw_utc AS time,
@@ -185,19 +188,21 @@ class AlgorithmHall:
     self.cached=[]
     by_algorithm=attributed_orders(orders)
     cutoff=draws[-1]['id'] if draws else None
+    from .algorithm_library import FormulaHistory
+    prepared=FormulaHistory(draws)
+    self.history_draws=draws
     for definition in DEFINITIONS:
      records=by_algorithm[definition['id']]
-     historical=evaluate(draws,definition,max(HALL_WINDOWS))['records']
-     windows={'all':metrics(historical,max(HALL_WINDOWS))}
+     windows=prepared.windows(definition,HALL_WINDOWS)
      for window in HALL_WINDOWS:
-      windows[str(window)]={**metrics(historical,window),
+      windows[str(window)]={**windows[str(window)],
                             'actual':order_totals(recent_orders(records,cutoff,window))}
      choice,reason=predict(draws,definition)
      if cutoff!=latest_stored:choice,reason=None,'最新本地开奖尚未核验'
      pending={'target_draw':cutoff+1 if cutoff is not None else None,'cutoff_draw':cutoff,
               'prediction':choice,'reason':reason}
      self.cached.append({**definition,'metrics':windows,'pending':pending,'records':records,
-                         'actual':order_totals(records),'history_records':historical})
+                         'actual':order_totals(records)})
     self.fingerprint=fingerprint
    return self.cached,self.fingerprint
  def hidden(self):
@@ -205,7 +210,8 @@ class AlgorithmHall:
  def listing(self,user_id,admin=False):
   rows,version=self.snapshot();counts={r['algorithm_id']:r['n'] for r in self.db.query('SELECT algorithm_id,COUNT(*) n FROM algorithm_favorites GROUP BY algorithm_id')};favorites={r['algorithm_id'] for r in self.db.query('SELECT algorithm_id FROM algorithm_favorites WHERE user_id=?',(user_id,))}
   hidden=self.hidden()
-  return {'algorithms':[{**{k:v for k,v in r.items() if k not in ('records','history_records')},'published':r['id'] not in hidden,'favorite':r['id'] in favorites,'favorites':counts.get(r['id'],0)} for r in rows if admin or r['id'] not in hidden],'version':version,'latest_id':rows[0]['pending']['cutoff_draw'] if rows else None,'note':'历史算法命中率：逐期开奖前仅使用此前已核验数据回放计算，不要求产生订单；缺期或无有效预测不计入命中率。实际下单收益：仅统计已结算的实时算法跟随模拟订单，历史回测及补单不计入；同一订单可能归属多个算法，收益不可跨算法相加。'}
+  backtests={r['algorithm_id']:json.loads(r['result']) for r in self.db.query('SELECT algorithm_id,result FROM algorithm_library_backtests')}
+  return {'algorithms':[{**{k:v for k,v in r.items() if k not in ('records','history_records')},'published':r['id'] not in hidden,'library_backtest':backtests.get(r['id']),'favorite':r['id'] in favorites,'favorites':counts.get(r['id'],0)} for r in rows if admin or r['id'] not in hidden],'version':version,'latest_id':rows[0]['pending']['cutoff_draw'] if rows else None,'note':'历史算法命中率：逐期开奖前仅使用此前已核验数据回放计算，不要求产生订单；缺期或无有效预测不计入命中率。实际下单收益：仅统计已结算的实时算法跟随模拟订单，历史回测及补单不计入；同一订单可能归属多个算法，收益不可跨算法相加。'}
  def detail(self,algorithm_id,page=1,page_size=20,admin=False,window=None,source='history'):
   if algorithm_id not in BY_ID or (not admin and algorithm_id in self.hidden()):raise ValueError('算法不存在或已下架')
   page=int(page);size=int(page_size)
@@ -215,7 +221,7 @@ class AlgorithmHall:
    if window not in HALL_WINDOWS:raise ValueError('统计窗口须为20、100、500、1000、2000或5000期')
   rows,version=self.snapshot();r=next(x for x in rows if x['id']==algorithm_id)
   if source not in ('history','orders'):raise ValueError('明细类型无效')
-  base=r['history_records'] if source=='history' else r['records']
+  base=evaluate(self.history_draws,BY_ID[algorithm_id],max(HALL_WINDOWS))['records'] if source=='history' else r['records']
   selected=recent_orders(base,r['pending']['cutoff_draw'],window) if window is not None else base
   records=list(reversed(selected));total=len(records);pages=max(1,(total+size-1)//size);page=max(1,min(page,pages))
   return {**{k:v for k,v in r.items() if k not in ('records','history_records')},'records':records[(page-1)*size:page*size],'page':page,'pages':pages,'page_size':size,'total':total,'version':version,'source':source}

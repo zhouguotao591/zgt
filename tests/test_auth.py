@@ -227,7 +227,7 @@ class AuthTests(unittest.TestCase):
   self.assertEqual(guest.authenticate('login',username='siteadmin',password='admin-password-123')[0],429)
 
  def test_member_algorithm_hall_favorites_authorization(self):
-  self.setup();member,d=self.member(self.invite()['code']);status,listing=member.call('/api/algorithms');self.assertEqual(status,200);self.assertEqual(len(listing['algorithms']),28)
+  self.setup();member,d=self.member(self.invite()['code']);status,listing=member.call('/api/algorithms');self.assertEqual(status,200);self.assertEqual(len(listing['algorithms']),310)
   body={'id':'size.follow.1','favorite':True,'user_id':1};self.assertEqual(member.call('/api/algorithm-favorite',body)[0],200)
   self.assertEqual(self.s.db.query('SELECT user_id FROM algorithm_favorites')[0]['user_id'],d['user']['id'])
   self.assertEqual(member.call('/api/algorithm-detail?id=size.follow.1')[0],200)

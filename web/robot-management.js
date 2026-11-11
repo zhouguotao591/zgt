@@ -75,7 +75,7 @@ window.pc28RobotReady=true;
  function riskSummary(r){
   if(!r)return '<p class="muted">尚未配置配资风控</p>';
   return '<p class="muted">配资 '+money(r.capital)+' · 已结算净盈亏 '+money(r.net)+' · 盈利峰值 '+money(r.peak)+
-   ' · 止损线 '+money(r.floor)+' · 在途 '+money(r.pending+r.held)+(r.paused?' · 风控暂停 '+E(r.paused):'')+
+   ' · 当前可用 '+money(r.available??(r.capital+r.net-r.pending-r.held))+' · 固定止损金额 '+(r.fixed_stop_balance?money(r.fixed_stop_balance):'未启用')+(r.calibration_amount!=null?' · 最近校准可用 '+money(r.calibration_amount)+'（'+E(beijingTime(r.calibrated_at))+'）':'')+' · 盈亏止损线 '+money(r.floor)+' · 在途 '+money(r.pending+r.held)+(r.paused?' · 风控暂停 '+E(r.paused):'')+
    (r.uncertain?' · 待核对 '+r.uncertain+' 笔':'')+'</p>';
  }
  function renderDetail(){const a=detail;if(!a)return;const botName=id=>a.bots.find(b=>b.id===id)?.name||'已归档机器人';$('detail').innerHTML=`<div class="ra-detail-box"><div class="section-head"><div><h3>${E(a.username)} · ${E(a.name)} / 机器人</h3><p>账号 #${a.external_account_id} · ${E(a.platform_name)}${a.sending?' · 有'+a.sending+'条发送中任务，修改无法撤回':''}</p></div>${btn('选择机器人','data-ra-bot-add',a.id)}</div>${a.bots.map(b=>`<div class="ra-bot-card"><div class="section-head"><div><strong>${E(b.name)}</strong> ${a.default_bot_id===b.id?'<span class="pill">默认订单机器人</span>':''}<small>机器人 #${b.external_bot_key} · ${E(b.signal_type)} · ${b.enabled?'当前账号已启用':'当前账号已停用'}</small></div><div class="admin-actions">${btn('配置订阅与金额','data-ra-subs',b.id)}${btn('编辑','data-ra-bot-edit',b.id)}${btn('配资风控','data-ra-risk-save',b.id)}${b.risk?.paused?btn('人工恢复','data-ra-risk-resume',b.id):''}${b.risk?.uncertain?btn('核对待确认订单','data-ra-risk-reconcile',b.id):''}${btn(b.enabled?'停用':'启用','data-ra-bot-control',b.id)}${a.default_bot_id!==b.id?btn('设为默认','data-ra-default',b.id):''}${btn('解除关联','data-ra-bot-delete',b.id)}</div></div>${riskSummary(b.risk)}<p class="muted">${a.subscriptions.filter(s=>s.bot_id===b.id&&s.enabled).map(s=>`${E(meta.strategies.find(t=>t.id===s.strategy_id)?.name||s.strategy_id)} · ${s.amount_mode==='fixed'?money(s.fixed_cents):'模拟金额 × '+num(s.ratio_units/10000)+'（向上取整到U）'}`).join('；')||'尚无有效策略订阅'}</p></div>`).join('')}${a.recent_skips?.length?'<p class="notice warning">最近拦截：'+a.recent_skips.map(x=>'第'+x.target_draw+'期 '+E(x.reason)).join('；')+'</p>':''}<p class="muted">默认机器人只预填新订阅；已有订阅不会自动改投。实际额度沿用会员记账，不改变模拟账户。</p></div>`;}
@@ -116,15 +116,17 @@ window.pc28RobotReady=true;
   actions=btn('取消','data-ra-modal-close','')+'<button type="submit">保存目录机器人</button>';
  }else if(m.type==='bot'){const b=m.bot||{name:'',external_bot_key:'',signal_type:'BUY_SYSTEM',enabled:true};html=botFields(b,0)+`<label><input id="ra-f-bot-enabled" type="checkbox" ${b.enabled?'checked':''}>启用机器人</label>`;if(b.id)html+=`<p class="muted">机器人ID不可改投。修改影响新订单，旧待发送任务取消。</p>`;actions=btn('取消','data-ra-modal-close','')+'<button type="submit">保存机器人</button>';
  }else if(m.type.startsWith('risk-')){
-  const r=m.bot.risk,number=(id,title,value,max='')=>'<label>'+title+'<input id="ra-risk-'+id+'" type="number" min="0.01" step="0.01" '+(max?'max="'+max+'"':'')+' value="'+E(value)+'" required></label>';
+  const r=m.bot.risk,number=(id,title,value,max='',min='0.01')=>'<label>'+title+'<input id="ra-risk-'+id+'" type="number" min="'+min+'" step="0.01" '+(max?'max="'+max+'"':'')+' value="'+E(value)+'" required></label>';
   html=riskSummary(r);
   if(m.type==='risk-save'){
    html+='<div class="ra-form-grid">'+number('capital','机器人配资（U）',r?r.capital/100:'')+
+    '<label>校准可用金额（U，留空不修改）<input id="ra-risk-calibration" type="number" min="0" step="0.01" placeholder="填写群里当前可用余额"></label>'+
+    number('fixed-stop','固定止损金额（U，0关闭）',(r?.fixed_stop_balance??0)/100,'','0')+
     '<label>初始止损方式<select id="ra-risk-mode"><option value="percent">按配资比例（%）</option><option value="amount">按固定金额（U）</option></select></label>'+
     number('limit','最大亏损比例或金额',r?r.loss_limit/100:'')+
     number('target','启用移动止损的盈利目标（U）',r?r.profit_target/100:'')+
     number('trailing','从盈利峰值允许回吐（%）',r?r.trailing_bps/100:50,50)+'</div>'+
-    '<p class="muted">首次配置从当前结算起算，未结算订单仍占用额度。固定止损及移动回撤比例均不得超过 50%。</p>';
+    '<p class="muted">校准金额填写群里已扣除下注本金的可用余额。校准后重建风控盈亏与峰值基准，后续自动按订单结算更新，不改历史账本。留空保留原校准；未确认预留继续占用。可用金额严格低于固定止损金额时暂停，批次预计跌破也会拦截。保存不会自动恢复已暂停机器人。原有最大亏损及移动回撤规则继续生效。</p>';
    actions=btn('取消','data-ra-modal-close','')+'<button type="submit">保存配资风控</button>';
   }else if(m.type==='risk-resume'){
    html+='<label>恢复时的盈亏基准<select id="ra-risk-reset"><option value="keep">保留原盈亏与盈利峰值</option><option value="reset">从当前重新计算盈亏与峰值</option></select></label><p class="muted">恢复前会重新校验止损线和在途敞口，已结算历史和未结算订单继续保留。</p>';
@@ -151,7 +153,7 @@ window.pc28RobotReady=true;
   const action=m.type.slice(5),body={id:m.account.id,bot_id:m.bot.id,bot_version:m.bot.version,action};
   if(action==='save'){
    const scaled=id=>Math.round(Number($('risk-'+id).value)*100);
-   Object.assign(body,{capital:scaled('capital'),loss_mode:$('risk-mode').value,loss_limit:scaled('limit'),profit_target:scaled('target'),trailing_bps:scaled('trailing')});
+   Object.assign(body,{capital:scaled('capital'),loss_mode:$('risk-mode').value,loss_limit:scaled('limit'),profit_target:scaled('target'),trailing_bps:scaled('trailing'),fixed_stop_balance:scaled('fixed-stop')});if($('risk-calibration').value.trim()!=='')body.calibration_amount=scaled('calibration');
   }else if(action==='resume')body.reset=$('risk-reset').value==='reset';
   else Object.assign(body,{outbox_id:Number($('risk-outbox').value),confirmed:$('risk-confirmed').checked});
   await apiPost('bot-risk',body);await saved(m.account.id);
@@ -240,5 +242,3 @@ window.pc28RobotReady=true;
  document.querySelector('[data-tab="admin-robot"]').addEventListener('click',()=>{load();recordAccounts().catch(e=>feedback(e.message));});document.getElementById('robot-refresh').addEventListener('click',()=>{meta=null;load();recordAccounts().catch(e=>feedback(e.message));});
  window.pc28RobotAccounts={refresh:load};
 })();
-
-
