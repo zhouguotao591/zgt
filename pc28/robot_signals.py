@@ -10,7 +10,7 @@ from . import robot_risk
 from . import order_confirmation
 from .timing import regular_schedule
 ENDPOINT='http://127.0.0.1:17890/api/v1/signals'
-TABLES={'legacy':'orders','trend':'trend_orders','custom':'custom_orders'}
+TABLES={'legacy':'orders','trend':'trend_orders','custom':'custom_orders','signal':'strategy_signals'}
 CONFIG={'enabled':False,'timeout_seconds':5,'max_attempts':3,'max_age_seconds':180,'send_interval_seconds':1,'account_id':0,'bot_key':0,'merge_wait_seconds':3,'delay_min_seconds':30,'delay_max_seconds':60}
 DRAW_SEND_BUFFER_SECONDS=10
 
@@ -138,6 +138,9 @@ class RobotSignals(Accounts,Platforms):
    if 'default_cents' not in binding_columns:c.execute('ALTER TABLE robot_bindings ADD COLUMN default_cents INTEGER NOT NULL DEFAULT 0')
    if 'strategy_amounts' not in binding_columns:c.execute("ALTER TABLE robot_bindings ADD COLUMN strategy_amounts TEXT NOT NULL DEFAULT '{}'")
    c.execute('INSERT OR IGNORE INTO robot_config VALUES(1,?,?)',(json.dumps(CONFIG),secrets.token_hex(12)))
+   from .strategy_signals import SCHEMA as SIGNAL_SCHEMA
+   for sql in SIGNAL_SCHEMA.split(';'):
+    if sql.strip():c.execute(sql)
    for engine,table in TABLES.items():
     maximum=c.execute('SELECT COALESCE(MAX(id),0) FROM '+table).fetchone()[0];c.execute('INSERT OR IGNORE INTO robot_cursors VALUES(?,?)',(engine,maximum))
    self.installation=c.execute('SELECT installation FROM robot_config WHERE id=1').fetchone()[0]
@@ -195,7 +198,7 @@ class RobotSignals(Accounts,Platforms):
  def recipients(self,c,context,order):
   if not c.execute('SELECT 1 FROM robot_bindings WHERE deleted=0 LIMIT 1').fetchone():return []
   rows=[dict(r) for r in c.execute('SELECT b.*,u.username FROM robot_bindings b JOIN web_users u ON u.id=b.user_id WHERE b.enabled=1 AND b.deleted=0 AND b.default_cents>=100 AND u.active=1 AND u.role=\'member\'')]
-  return [r for r in rows if c.execute('SELECT 1 FROM robot_platforms WHERE id=? AND enabled=1',(r['platform_id'],)).fetchone() and context['strategy_id'] in json.loads(r['strategy_ids']) and order['id']>json.loads(r['starts']).get(context['engine'],0)]
+  return [r for r in rows if c.execute('SELECT 1 FROM robot_platforms WHERE id=? AND enabled=1',(r['platform_id'],)).fetchone() and context['strategy_id'] in json.loads(r['strategy_ids']) and order['id']>json.loads(r['starts']).get(context['engine'],0) and ((context['engine']=='signal') == (isinstance(json.loads(r['strategy_amounts']).get(context['strategy_id']),dict) and json.loads(r['strategy_amounts'])[context['strategy_id']].get('mode')=='plan'))]
  def recipient_active(self,c,row):
   if not row['recipient_id']:return False
   binding=c.execute("SELECT b.* FROM robot_bindings b JOIN web_users u ON u.id=b.user_id WHERE b.id=? AND b.deleted=0 AND b.enabled=1 AND u.active=1 AND u.role='member'",(row['recipient_id'],)).fetchone()
@@ -273,7 +276,7 @@ class RobotSignals(Accounts,Platforms):
   rule=validate_rule(body);wire,message=self.build_request(rule,sample_context(),'preview-not-sent');return {'request':wire,'message':message,'endpoint':ENDPOINT}
  def context(self,c,engine,o):
   key='legacy' if engine=='legacy' else o['strategy'];name={'legacy':'原有反转策略','size':'大小策略','parity':'单双策略'}.get(key,key)
-  if engine=='custom':
+  if engine in ('custom','signal'):
    row=c.execute('SELECT name FROM custom_strategies WHERE id=?',(key,)).fetchone();name=row[0] if row else key
   direction=json.loads(o['strategy_json'])['direction'] if engine=='legacy' else o['direction'];created=datetime.fromisoformat(o['created'])
   return {'strategy_name':name,'strategy_id':key,'engine':engine,'order_id':o['id'],'target_draw':o['target_draw'],'cutoff_draw':o['cutoff_draw'],'direction':direction,'stake':f"{o['stake']/100:.2f}".rstrip('0').rstrip('.'),'stake_cents':o['stake'],'created_at':o['created'],'beijing_time':created.astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S'),'cycle':o['round_id'] if engine=='legacy' else o['cycle'],'step':o['round_attempt'] if engine=='legacy' else o['step'],'symbol':'PC28'}
@@ -292,6 +295,7 @@ class RobotSignals(Accounts,Platforms):
      try:when=int(datetime.fromisoformat(o['created']).timestamp())
      except (TypeError,ValueError):continue
      if now-when>cfg['max_age_seconds'] or when>now+30:continue
+     if engine=='signal' and (o['status']!='pending' or c.execute('SELECT 1 FROM draws WHERE id=?',(o['target_draw'],)).fetchone()):continue
      context=self.context(c,engine,o)
      self.capture_gates(c,context,o)
      if not self.active_strategy(c,context['strategy_id']):continue
@@ -304,13 +308,25 @@ class RobotSignals(Accounts,Platforms):
        mapping=None
        if recipient['id']:
         mapping=c.execute('SELECT * FROM robot_binding_map WHERE binding_id=?',(recipient['id'],)).fetchone()
-       cents=member_stake(json.loads(recipient['strategy_amounts']).get(context['strategy_id']),recipient['default_cents'],o['stake']);own_context={**context,'stake_cents':cents,'stake':f'{cents/100:.2f}'.rstrip('0').rstrip('.')}
+       subscription=None;snapshot=None
+       if engine=='signal':
+        subscription=c.execute('SELECT * FROM robot_subscriptions WHERE bot_id=? AND strategy_id=? AND enabled=1',(mapping['bot_id'],context['strategy_id'])).fetchone() if mapping else None
+        if not subscription:continue
+        try:
+         from .money_plans import quote
+         cents,snapshot=quote(c,subscription)
+        except ValueError as error:
+         c.execute('INSERT OR IGNORE INTO robot_capture_skips VALUES(?,?,?,?,?,?,?,?)',(engine,o['id'],mapping['account_id'],mapping['bot_id'],context['strategy_id'],o['target_draw'],str(error),utcnow()));continue
+       else:cents=member_stake(json.loads(recipient['strategy_amounts']).get(context['strategy_id']),recipient['default_cents'],o['stake'])
+       own_context={**context,'stake_cents':cents,'stake':f'{cents/100:.2f}'.rstrip('0').rstrip('.')}
        event=f"pc28-{self.installation}-{rule['id']}-{recipient['id']}-{engine}-{o['id']}-{o['target_draw']}";wire,message=self.build_request(active,own_context,event)
        if recipient['id']:wire.update(account_id=recipient['account_id'],bot_key=recipient['bot_key'],signal_type=recipient['signal_type'])
        valid=100<=own_context['stake_cents']<=2000000
        cur=c.execute("INSERT OR IGNORE INTO robot_outbox(event_id,rule_id,name,engine,order_id,strategy_id,strategy_name,target_draw,event_time,created,request,message,status,recipient_id,recipient_name,push_cents,last_error,platform_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(event,rule['id'],rule['name'],engine,o['id'],context['strategy_id'],context['strategy_name'],o['target_draw'],when,utcnow(),json.dumps(wire,ensure_ascii=False),message,'pending' if valid else 'failed',recipient['id'],recipient['username'],own_context['stake_cents'],'' if valid else '按比例计算的下单金额超出1—20000U，未发送',recipient['platform_id']));added+=cur.rowcount
        if cur.rowcount:
-        oid=cur.lastrowid;c.execute('UPDATE robot_outbox SET member_odds=?,member_user_id=?,simulation_cents=? WHERE id=?',(json.dumps(self.service.cfg['odds']),recipient['user_id'],o['stake'],oid))
+        oid=cur.lastrowid
+        if subscription:c.execute('UPDATE robot_outbox SET subscription_id=?,money_plan_snapshot=? WHERE id=?',(subscription['id'],snapshot,oid))
+        c.execute('UPDATE robot_outbox SET member_odds=?,member_user_id=?,simulation_cents=? WHERE id=?',(o['odds_json'] if engine=='signal' else json.dumps(self.service.cfg['odds']),recipient['user_id'],o['stake'],oid))
         if mapping:
          c.execute('UPDATE robot_outbox SET follow_account_id=?,bot_id=?,config_version=(SELECT version FROM robot_accounts WHERE id=?) WHERE id=?',(mapping['account_id'],mapping['bot_id'],mapping['account_id'],oid))
         sealed=c.execute('SELECT 1 FROM robot_delivery_slots WHERE recipient_id=? AND target_draw=?',(recipient['id'],o['target_draw'])).fetchone()
@@ -543,9 +559,9 @@ class RobotSignals(Accounts,Platforms):
  def run(self):
   while not self.service.stop.wait(.5):
    try:
-    self.capture()
     from .member_orders import sync
     sync(self.service)
+    self.capture()
     for platform in self.platforms():
      key=platform['id'];worker=self.platform_workers.get(key)
      if not worker or not worker.is_alive():

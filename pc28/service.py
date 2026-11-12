@@ -25,6 +25,8 @@ class Service:
   self.algorithm_hall=AlgorithmHall(self.db)
   from .notifications import Notifications
   self.notifications=Notifications(self)
+  from .strategy_signals import initialize as initialize_signals,Signals
+  initialize_signals(self.db);self.signals=Signals(self)
   from .robot_signals import RobotSignals
   self.robot=RobotSignals(self)
   from .member_orders import initialize as initialize_members
@@ -35,6 +37,9 @@ class Service:
   self.tools=Tools(self)
   saved=self.db.query("SELECT value FROM runtime_state WHERE key='draw_timer'");self.draw_timer=DrawTimer(json.loads(saved[0]['value']) if saved else None)
   (self.root/'data/exports').mkdir(parents=True,exist_ok=True)
+ def _signal_tick(self):
+  try:self.signals.tick()
+  except Exception as e:self.db.log_job('strategy_signals','error',{'error':str(e),'trace':traceback.format_exc()})
  def start(self):
   self.worker=threading.Thread(target=self._worker,name='pc28-jobs',daemon=True);self.worker.start();self.collect_worker=threading.Thread(target=self._worker,args=(self.collect_q,),name='pc28-collector',daemon=True);self.collect_worker.start();self.scheduler=threading.Thread(target=self._schedule,name='pc28-scheduler',daemon=True);self.scheduler.start();self.robot.start();self.ai.start()
   threading.Thread(target=self.notifications.run,name='pc28-notifications',daemon=True).start()
@@ -75,6 +80,7 @@ class Service:
    if now>=next_tick:
     try:
      with self.lock:
+      self._signal_tick()
       tick(self.db,c);trend_strategy.live_tick(self.db,c);custom_strategy.tick(self.db,c)
     except Exception as e:self.db.log_job('simulation','error',{'error':str(e)})
     next_tick=now+5
@@ -107,12 +113,15 @@ class Service:
      rows=self.db.tail(1);latest=rows[0] if rows else None
      self.draw_timer.update(result.get('draw_schedule'),latest['id'] if latest else 0,latest=latest);self.save_draw_timer()
      self.db.log_job('collection_trigger','ok',{'trigger':result['trigger'],'expected_draw':args.get('expected_draw'),'selected_source':result['selected_source']})
+    self._signal_tick()
     result['simulation']=tick(self.db,c);result['trend_simulation']=trend_strategy.live_tick(self.db,c);custom_strategy.tick(self.db,c)
    return result
   if kind=='repair_pending':
    from .collector import repair_pending_once
    result=repair_pending_once(self.db,self.root,c['collector'])
-   with self.lock:result['simulation']=tick(self.db,c);result['trend_simulation']=trend_strategy.live_tick(self.db,c);custom_strategy.tick(self.db,c)
+   with self.lock:
+    self._signal_tick()
+    result['simulation']=tick(self.db,c);result['trend_simulation']=trend_strategy.live_tick(self.db,c);custom_strategy.tick(self.db,c)
    return result
   if kind=='repair_raw':
    from .collector import repair_raw_once
@@ -124,6 +133,7 @@ class Service:
    result=import_file(self.db,self.root,args['path'],c['collector']);return result
   if kind=='tick':
    with self.lock:
+    self._signal_tick()
     result=tick(self.db,c);trend_strategy.live_tick(self.db,c);custom_strategy.tick(self.db,c);return result
   if kind=='export_draws':
    name='converted-draws-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.csv'

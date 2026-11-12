@@ -19,6 +19,14 @@ def migrate(c):
         ('calibrated_at', "TEXT NOT NULL DEFAULT ''"),
         ('fixed_stop_balance', 'INTEGER NOT NULL DEFAULT 0'),
         ('calibration_revision', 'INTEGER NOT NULL DEFAULT 0'),
+        ('daily_loss_limit', 'INTEGER NOT NULL DEFAULT 0'),
+        ('max_drawdown', 'INTEGER NOT NULL DEFAULT 0'),
+        ('max_stake', 'INTEGER NOT NULL DEFAULT 0'),
+        ('win_limit', 'INTEGER NOT NULL DEFAULT 0'),
+        ('loss_streak_limit', 'INTEGER NOT NULL DEFAULT 0'),
+        ('pause_draws', 'INTEGER NOT NULL DEFAULT 20'),
+        ('pause_until_draw', 'INTEGER NOT NULL DEFAULT 0'),
+        ('streak_baseline', 'INTEGER NOT NULL DEFAULT 0'),
     ):
         if name not in fields:
             c.execute(f'ALTER TABLE robot_risk ADD COLUMN {name} {definition}')
@@ -87,7 +95,21 @@ def state(c, bot_id):
     if peak >= rule['profit_target']:
         floor = max(floor, peak - peak * rule['trailing_bps'] // 10000)
     funds = risk_capital + net
-    return {**dict(rule), 'net': net, 'peak': peak, 'floor': floor,
+    from datetime import datetime,timezone
+    from zoneinfo import ZoneInfo
+    day=datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).date()
+    daily=0;wins=losses=0;last_draw=last_order=0
+    for order in c.execute("SELECT id,pnl,outcome,target_draw,settled_at FROM member_orders WHERE bot_id=? AND status='settled' ORDER BY id",(bot_id,)):
+        if order['settled_at']:
+            try:
+                if datetime.fromisoformat(order['settled_at']).astimezone(ZoneInfo('Asia/Shanghai')).date()==day:daily+=order['pnl'] or 0
+            except ValueError:pass
+        if order['id']<=rule['streak_baseline']:continue
+        if order['outcome']=='win':wins+=1;losses=0
+        elif order['outcome']=='loss':losses+=1;wins=0
+        last_draw=order['target_draw'];last_order=order['id']
+    return {**dict(rule), 'net': net, 'peak': peak, 'floor': floor,'daily_net':daily,
+            'win_streak':wins,'loss_streak':losses,'last_draw':last_draw,'last_order':last_order,
             'risk_capital': risk_capital, 'funds': funds, 'available': funds-risk_pending-risk_held,
             'risk_pending': risk_pending, 'risk_held': risk_held,
             'pending': pending, 'held': held, 'uncertain': len(unresolved), 'unresolved': unresolved}
@@ -95,13 +117,24 @@ def state(c, bot_id):
 
 def check(c, bot_id):
     risk = state(c, bot_id)
+    if risk and risk['pause_until_draw']:
+        latest=c.execute('SELECT COALESCE(MAX(id),0) FROM draws').fetchone()[0]
+        if latest>=risk['pause_until_draw']:
+            c.execute("UPDATE robot_risk SET paused='',pause_until_draw=0,streak_baseline=? WHERE bot_id=?",(risk['last_order'],bot_id))
+            risk=state(c,bot_id)
     if risk and not risk['paused']:
         reason = ('机器人可用金额不足，停止下单' if risk['available'] <= 0
                   else f"可用金额 {risk['available']/100:.2f} U 低于固定止损金额 {risk['fixed_stop_balance']/100:.2f} U"
                   if risk['fixed_stop_balance'] > 0 and risk['available'] < risk['fixed_stop_balance']
                   else '触及配资50%强制止损线' if risk['net'] <= -(risk['risk_capital'] // 2)
                   else '触及移动止损线' if risk['net'] <= risk['floor'] and risk['peak'] >= risk['profit_target']
-                  else '触及固定止损线' if risk['net'] <= risk['floor'] else '')
+                  else '触及固定止损线' if risk['net'] <= risk['floor']
+                  else '触及机器人单日最大亏损' if risk['daily_loss_limit'] and risk['daily_net']<=-risk['daily_loss_limit']
+                  else '触及机器人最大回撤' if risk['max_drawdown'] and risk['peak']-risk['net']>=risk['max_drawdown']
+                  else '')
+        if not reason and ((risk['win_limit'] and risk['win_streak']>=risk['win_limit']) or (risk['loss_streak_limit'] and risk['loss_streak']>=risk['loss_streak_limit'])):
+            reason='机器人连续盈亏暂停';until=risk['last_draw']+risk['pause_draws']
+            c.execute('UPDATE robot_risk SET pause_until_draw=? WHERE bot_id=?',(until,bot_id));risk['pause_until_draw']=until
         if reason:
             c.execute('UPDATE robot_risk SET paused=? WHERE bot_id=?', (reason, bot_id))
             risk['paused'] = reason
@@ -126,6 +159,10 @@ def save(c, bot_id, body):
     # Omission preserves a previous absolute balance floor for older callers.
     if 'fixed_stop_balance' in body:
         c.execute('UPDATE robot_risk SET fixed_stop_balance=? WHERE bot_id=?', (fixed_stop, bot_id))
+    for key in ('daily_loss_limit','max_drawdown','max_stake','win_limit','loss_streak_limit','pause_draws'):
+        if key in body:
+            value=integer(body[key],key,1 if key=='pause_draws' else 0,1000000000000 if key in ('daily_loss_limit','max_drawdown') else 2000000 if key=='max_stake' else 100000)
+            c.execute('UPDATE robot_risk SET '+key+'=? WHERE bot_id=?',(value,bot_id))
     if calibration is not None:
         calibrate(c, bot_id, calibration)
     # Capture attempts already in progress when the policy is first configured.
@@ -159,6 +196,10 @@ def admit(c, bot_id, members):
         return '无法核验机器人批次金额'
     extra = sum(row['push_cents'] for row in members if not c.execute(
         'SELECT 1 FROM robot_risk_holds WHERE outbox_id=?', (row['id'],)).fetchone())
+    if risk['max_stake'] and any(row['push_cents']>risk['max_stake'] for row in members):return '本批订单超过机器人单笔金额上限'
+    exposure=risk['risk_pending']+risk['risk_held']+extra
+    if risk['daily_loss_limit'] and risk['daily_net']-exposure < -risk['daily_loss_limit']:return '本批订单可能突破机器人单日亏损预算'
+    if risk['max_drawdown'] and risk['peak']-risk['net']+exposure>risk['max_drawdown']:return '本批订单可能突破机器人回撤预算'
     if risk['available'] <= 0 or risk['available'] < extra:
         return '机器人可用金额不足，停止下单'
     if risk['fixed_stop_balance'] > 0 and risk['available'] - extra < risk['fixed_stop_balance']:
@@ -193,7 +234,7 @@ def resume(c, bot_id, reset):
         raise ValueError('可用金额仍低于固定止损金额，请先校准实际资金或调整止损金额')
     if risk['net'] - risk['risk_pending'] - risk['risk_held'] <= risk['floor']:
         raise ValueError('仍处于止损线，请等待结算或选择重新计算盈亏')
-    c.execute("UPDATE robot_risk SET paused='' WHERE bot_id=?", (bot_id,))
+    c.execute("UPDATE robot_risk SET paused='',pause_until_draw=0,streak_baseline=? WHERE bot_id=?", (risk['last_order'],bot_id))
     return state(c, bot_id)
 
 

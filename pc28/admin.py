@@ -15,6 +15,9 @@ def page_rows(db,table,columns,q,where='1',args=()):
 
 def get(service,path,q,user=None):
  db=service.db;auth=service.auth;scope=member_scope(user)
+ if path=='money-plans':
+  from .money_plans import listing
+  return listing(service)
  if path=='ai':return service.ai.admin()
  if path=='algorithms':return service.algorithm_hall.listing(user['id'],admin=True)
  if path=='algorithm-detail':
@@ -30,7 +33,7 @@ def get(service,path,q,user=None):
   return {'administrator':administrator,'members':members}
  if path=='robot':
   from .robot_signals import ENDPOINT
-  return {'platforms':service.robot.platforms(),'config':service.robot.config(),'endpoint':ENDPOINT,'token_configured':service.robot.secret.exists(),'strategies':service.robot.strategies(),'bindings':service.robot.bindings(scope),'members':service.robot.members(scope)}
+  return {'platforms':service.robot.platforms(),'config':service.robot.config(),'endpoint':ENDPOINT,'token_configured':service.robot.secret.exists(),'amount_plans':__import__('pc28.money_plans',fromlist=['listing']).listing(service)['rows'],'strategies':service.robot.strategies(),'bindings':service.robot.bindings(scope),'members':service.robot.members(scope)}
  if path=='robot-accounts':return service.robot.account_list(q,scope)
  if path=='robot-catalog':return service.robot.catalog_list(scope)
  if path=='robot-account':
@@ -71,6 +74,9 @@ def check_resource_member(service,user,table,column,key):
 
 def post(service,path,body,user,ip):
  db=service.db;auth=service.auth
+ if path=='money-plan-save':
+  from .money_plans import save
+  return save(service,body,user,ip)
  if path in ('strategy-publish','algorithm-publish'):
   from .algorithm_hall import BY_ID
   kind=path.split('-',1)[0]

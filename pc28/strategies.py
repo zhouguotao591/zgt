@@ -66,7 +66,12 @@ def catalog(db,cfg,tasks=None):
   task=next((t for t in reversed(list((tasks or {}).values())) if t.get('strategy_id')==r['id'] and t['kind']=='history_backtest'),None)
   r['backtest_task']={k:task.get(k) for k in ('id','status','progress','percent','error')} if task else None
  hidden={r['item_id'] for r in db.query("SELECT item_id FROM public_visibility WHERE kind='strategy' AND published=0")}
- for row in rows:row['published']=row['id'] not in hidden
+ from .strategy_signals import stats as signal_stats
+ signals=signal_stats(db)
+ for row in rows:
+  row['published']=row['id'] not in hidden
+  row['signals']=signals.get(row['id'],{'bets':0,'wins':0,'win_rate':None,'net':0,'roi':None,'pending':0})
+  row['signal_status']='等待开奖' if row['signals'].get('pending') else '等待入场'
  return {'strategies':rows,'note':'停用停止新订单，已有订单继续结算；历史统计保留。'}
 def control(service,body):
  key=body.get('id')

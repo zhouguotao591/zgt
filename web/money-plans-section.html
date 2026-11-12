@@ -1,0 +1,25 @@
+<section id="money-plans" class="tab">
+ <div class="panel"><div class="section-head"><div><h2>金额配置管理</h2><p>先配置金额方案，再到机器人订阅中为每个策略选择。方向信号与金额、机器人风控独立。</p></div><div class="admin-actions"><button id="mp-refresh" class="secondary">刷新</button><button id="mp-add">新增金额方案</button></div></div>
+ <p id="mp-message" role="status"></p><div id="mp-table" class="table-wrap"></div>
+ </div>
+</section>
+<dialog id="mp-dialog" class="mp-dialog">
+ <form id="mp-form"><header><h2 id="mp-title">新增金额方案</h2><button id="mp-close" type="button" class="secondary" aria-label="关闭">×</button></header>
+ <div class="mp-fields">
+ <label>方案名称<input id="mp-name" maxlength="50" required></label>
+ <label>金额模式<select id="mp-mode"><option value="fixed">固定金额</option><option value="adjust">赢减亏加</option><option value="additive">亏后加额，赢后恢复基础</option><option value="multiply">亏后倍增，赢后恢复基础</option></select></label>
+ <label>基础金额（U）<input id="mp-base_cents" type="number" min="1" max="20000" step="1" value="100" required></label>
+ <label data-mp-kind="additive adjust">亏后增加（U）<input id="mp-loss_increment_cents" type="number" min="0" max="20000" step="1" value="100" required></label>
+ <label data-mp-kind="adjust">赢后减少（U）<input id="mp-win_decrement_cents" type="number" min="0" max="20000" step="1" value="100" required></label>
+ <label data-mp-kind="multiply">亏后倍数<input id="mp-multiplier_hundredths" type="number" min="1" max="100" step="0.01" value="2" required></label>
+ <label data-mp-kind="additive multiply adjust">累计加额次数上限（0不限）<input id="mp-max_increase_steps" type="number" min="0" max="100000" step="1" value="0" required></label>
+ <label data-mp-kind="adjust">累计减额次数上限（0不限）<input id="mp-max_decrease_steps" type="number" min="0" max="100000" step="1" value="0" required></label>
+ <label>最低金额（U）<input id="mp-min_cents" type="number" min="1" max="20000" step="1" value="1" required></label>
+ <label>最高金额（U）<input id="mp-max_cents" type="number" min="1" max="20000" step="1" value="20000" required></label>
+ <label data-mp-kind="adjust">减额下限<select id="mp-stake_floor"><option value="market">允许降至最低金额</option><option value="base">不低于基础金额</option></select></label>
+ <label class="mp-enabled"><input id="mp-enabled" type="checkbox" checked> 启用此金额方案</label>
+ </div><p class="muted">加额、减额分别累计，期间相反结果不清零。任一上限达到后，下一笔恢复基础金额，两项重新计数。退本不调整。共用方案的各机器人订阅独立计算。</p>
+ <p class="notice warning">编辑将产生新版本，下一笔从基础金额重新计算；已生成的任务保留原金额和版本。停用方案会阻止新任务，已封存的任务仍按原配置处理。</p>
+ <p id="mp-error" role="alert"></p><div class="mp-actions"><button type="button" id="mp-cancel" class="secondary">取消</button><button id="mp-save" type="submit">保存方案</button></div>
+ </form>
+</dialog>

@@ -65,3 +65,5 @@
   color: #52687d;
   font-size: 12px;
 }
+
+#ra-dialog .ra-sub-row{grid-template-columns:minmax(160px,1.25fr) minmax(145px,1fr) minmax(125px,.85fr) minmax(160px,1.1fr)}#ra-dialog .ra-sub-row>label{min-width:0;overflow-wrap:anywhere;justify-content:flex-start}#ra-dialog .ra-sub-row input[type=checkbox]{width:16px;height:16px;flex:0 0 16px;margin:0}#ra-dialog .ra-sub-row [hidden]{display:none!important}@media(max-width:650px){#ra-dialog .ra-sub-row{grid-template-columns:1fr}#ra-dialog .ra-sub-row.muted{display:none}#ra-dialog .ra-sub-row>label{grid-column:auto}}

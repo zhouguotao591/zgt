@@ -39,8 +39,11 @@ class Accounts:
    if 'UNIQUE(account_id,strategy_id)' in subscription_schema:
     c.execute('ALTER TABLE robot_subscriptions RENAME TO robot_subscriptions_v1')
     c.execute(next(sql for sql in SCHEMA.split(';') if 'CREATE TABLE IF NOT EXISTS robot_subscriptions(' in sql))
-    c.execute('INSERT INTO robot_subscriptions SELECT * FROM robot_subscriptions_v1')
+    fields=','.join(r[1] for r in c.execute('PRAGMA table_info(robot_subscriptions)'))
+    c.execute('INSERT INTO robot_subscriptions('+fields+') SELECT '+fields+' FROM robot_subscriptions_v1')
     c.execute('DROP TABLE robot_subscriptions_v1')
+   from .money_plans import initialize as initialize_money
+   initialize_money(c)
    if 'default_cents' not in {r['name'] for r in c.execute('PRAGMA table_info(robot_accounts)')}:c.execute('ALTER TABLE robot_accounts ADD COLUMN default_cents INTEGER NOT NULL DEFAULT 10000')
    if 'catalog_id' not in {r['name'] for r in c.execute('PRAGMA table_info(robot_bots)')}:
     c.execute('ALTER TABLE robot_bots ADD COLUMN catalog_id INTEGER REFERENCES robot_catalog(id)')
@@ -109,7 +112,7 @@ class Accounts:
  def _materialize(self,c,aid):
   a=self._account(c,aid);now=utcnow()
   for bot in c.execute('SELECT * FROM robot_bots WHERE account_id=? AND deleted=0',(aid,)).fetchall():
-   subs=c.execute('SELECT * FROM robot_subscriptions WHERE account_id=? AND bot_id=? AND enabled=1 ORDER BY strategy_id',(aid,bot['id'])).fetchall();ids=[s['strategy_id'] for s in subs];amounts={s['strategy_id']:({'mode':'fixed','cents':s['fixed_cents']} if s['amount_mode']=='fixed' else {'mode':'ratio','ratio_units':s['ratio_units']}) for s in subs};enabled=int(a['enabled'] and bot['enabled'] and bool(ids));old=c.execute('SELECT * FROM robot_bindings WHERE id=?',(bot['binding_id'],)).fetchone() if bot['binding_id'] else None
+   subs=c.execute('SELECT * FROM robot_subscriptions WHERE account_id=? AND bot_id=? AND enabled=1 ORDER BY strategy_id',(aid,bot['id'])).fetchall();ids=[s['strategy_id'] for s in subs];amounts={s['strategy_id']:({'mode':'plan','plan_id':s['money_plan_id']} if s['amount_mode']=='plan' else {'mode':'fixed','cents':s['fixed_cents']} if s['amount_mode']=='fixed' else {'mode':'ratio','ratio_units':s['ratio_units']}) for s in subs};enabled=int(a['enabled'] and bot['enabled'] and bool(ids));old=c.execute('SELECT * FROM robot_bindings WHERE id=?',(bot['binding_id'],)).fetchone() if bot['binding_id'] else None
    if old and not old['deleted'] and (old['signal_type'],old['enabled'],json.loads(old['strategy_ids']),json.loads(old['strategy_amounts']))==(bot['signal_type'],enabled,ids,amounts):continue
    starts=json.dumps(self.maximums(c));base=10000
    if old:
@@ -184,14 +187,20 @@ class Accounts:
    if pair in seen:raise ValueError('同一机器人的策略重复')
    seen.add(pair)
    mode=value.get('amount_mode');old=c.execute('SELECT * FROM robot_subscriptions WHERE account_id=? AND bot_id=? AND strategy_id=?',(a['id'],bid,sid)).fetchone();fixed=value.get('fixed_cents',10000);ratio=value.get('ratio_units',10000)
-   if mode=='fixed':
+   plan_id=None
+   if mode=='plan':
+    from .money_plans import available
+    plan_id=integer(value.get('money_plan_id'),'金额方案ID');available(c,plan_id)
+   elif mode=='fixed':
     integer(fixed,'固定金额分',100,2000000)
     if fixed%100 and not(old and old['legacy_fraction'] and old['fixed_cents']==fixed):raise ValueError('新固定金额须为1—20000整数U；旧小数配置可原值保留')
    elif mode=='ratio':integer(ratio,'比例万分位',1,1000000)
-   else:raise ValueError('金额方式须为固定或模拟比例')
+   else:raise ValueError('请选择金额方案、固定金额或模拟比例')
    enabled=flag(value.get('enabled',True));setting=(bid,mode,fixed,ratio,enabled)
-   if old and (old['bot_id'],old['amount_mode'],old['fixed_cents'],old['ratio_units'],old['enabled'])==setting:continue
+   if old and (old['bot_id'],old['amount_mode'],old['fixed_cents'],old['ratio_units'],old['enabled'])==setting and old['money_plan_id']==plan_id:continue
    starts=json.dumps(self.maximums(c));c.execute('INSERT INTO robot_subscriptions(account_id,strategy_id,bot_id,amount_mode,fixed_cents,ratio_units,enabled,starts) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id,bot_id,strategy_id) DO UPDATE SET amount_mode=excluded.amount_mode,fixed_cents=excluded.fixed_cents,ratio_units=excluded.ratio_units,enabled=excluded.enabled,starts=excluded.starts,version=version+1',(a['id'],sid,*setting,starts))
+   c.execute('UPDATE robot_subscriptions SET money_plan_id=? WHERE account_id=? AND bot_id=? AND strategy_id=?',(plan_id,a['id'],bid,sid))
+   if old and (old['amount_mode']!=mode or old['money_plan_id']!=plan_id):c.execute('DELETE FROM money_plan_states WHERE subscription_id=?',(old['id'],))
   for row in c.execute('SELECT bot_id,strategy_id FROM robot_subscriptions WHERE account_id=? AND enabled=1 AND (? IS NULL OR bot_id=?)',(a['id'],scope_bot_id,scope_bot_id)).fetchall():
    if tuple(row) not in seen:c.execute('UPDATE robot_subscriptions SET enabled=0,version=version+1 WHERE account_id=? AND bot_id=? AND strategy_id=?',(a['id'],*row))
  def account_detail(self,key):
