@@ -4,7 +4,7 @@
  const el=id=>document.getElementById('mf-'+id),money=v=>v==null?'—':num(v/100),date=v=>esc(beijingTime(v));
  const state={orders:{page:1,pages:1,filters:{},busy:false},ledger:{page:1,pages:1,filters:{},busy:false}};
  let editing=null,requestId='';
- const status={pending:'待开奖',settled:'已结算',void:'作废退款'},outcome={win:'盈利',loss:'亏损',refund:'退本金',void:'作废退回'};
+ const status={pending:'待开奖',settled:'已结算',void:'作废退款'},outcome={execution_rejected:'执行异常（已冲正）',win:'盈利',loss:'亏损',refund:'退本金',void:'作废退回'};
  function pager(kind,d){const s=state[kind];Object.assign(s,{page:d.page,pages:d.pages});el(kind+'-page').textContent=`第 ${d.page} / ${d.pages} 页 · 共 ${num(d.total)} 条`;document.querySelectorAll(`[data-mf-page="${kind}"]`).forEach(b=>b.disabled=['first','prev'].includes(b.dataset.move)?d.page<=1:d.page>=d.pages);}
  async function load(kind){const s=state[kind];if(s.busy)return;s.busy=true;try{
   const q=new URLSearchParams({page:s.page,page_size:el(kind+'-size').value,...s.filters});
@@ -12,7 +12,7 @@
   const d=await api('/api/admin/member-'+(kind==='orders'?'orders':'ledger')+'?'+q);
   el(kind+'-error').textContent='';pager(kind,d);
   if(kind==='orders')table('mf-orders-table',[
-   ['会员','username'],['期号','target_draw'],['发送时间',r=>`<span title="${date(r.placed_at)}">${date(r.placed_at).slice(5)}</span>`],
+   ['会员','username'],['期号','target_draw'],['发送时间（北京时间）',r=>date(r.placed_at)],
    ['实际跟单数据',r=>`<strong class="mf-bet">${esc(r.direction)} ${money(r.stake)} U</strong>`],
    ['本期开奖结果',r=>r.total==null?'待开奖':`<strong>${[r.draw_a,r.draw_b,r.draw_c].every(v=>v!=null)&&r.draw_a+r.draw_b+r.draw_c===r.total?esc([r.draw_a,r.draw_b,r.draw_c].join('+'))+' = ':''}${r.total}</strong><small class="mf-order-sub">${esc(r.result||'')}</small>`],
    ['盈亏（U）',r=>r.pnl==null?'—':cash(r.pnl/100)],
@@ -21,9 +21,9 @@
    ['明细',r=>`<button class="secondary" data-mf-order="${r.id}">查看</button>`]
   ],d.rows);
   else table('mf-ledger-table',[
-   ['时间',r=>date(r.created)],['会员','username'],['类型',r=>({opening:'历史会员初始化',adjust:'人工额度调整',stake:'跟单扣款',settle:'开奖结算'})[r.kind]||esc(r.kind)],['变动金额',r=>cash(r.amount/100)],['变动前余额',r=>money(r.before_balance)],['变动后余额',r=>money(r.after_balance)],['调整前本金',r=>money(r.principal_before)],['调整后本金',r=>money(r.principal_after)],['操作者',r=>esc(r.actor_name||'系统')],['订单编号',r=>r.order_id??'—'],['备注','note']
+   ['时间（北京时间）',r=>date(r.created)],['会员','username'],['类型',r=>({opening:'历史会员初始化',adjust:'人工额度调整',stake:'跟单扣款',settle:'开奖结算',execution_reversal:'执行异常冲正'})[r.kind]||esc(r.kind)],['变动金额',r=>cash(r.amount/100)],['变动前余额',r=>money(r.before_balance)],['变动后余额',r=>money(r.after_balance)],['调整前本金',r=>money(r.principal_before)],['调整后本金',r=>money(r.principal_after)],['操作者',r=>esc(r.actor_name||'系统')],['订单编号',r=>r.order_id??'—'],['备注','note']
   ],d.rows);
- if(kind==='orders')document.querySelectorAll('[data-mf-order]').forEach(b=>b.onclick=()=>{const r=d.rows.find(x=>x.id===Number(b.dataset.mfOrder));el('detail-content').textContent=['会员：'+r.username,'期号：'+r.target_draw,'发送时间：'+beijingTime(r.placed_at),'实际跟单：'+r.direction+' '+money(r.stake)+' U','策略：'+r.strategy_name,'合并编号：'+(r.batch_id||'—'),'本期开奖结果：'+(r.total==null?'待开奖':r.total+' '+r.result),'盈亏：'+money(r.pnl)+' U','下注扣款：'+money(r.before_balance)+' → '+money(r.after_stake_balance),'结算返还：'+money(r.before_settle_balance)+' → '+money(r.after_settle_balance)].join('\n');el('detail-dialog').showModal();});
+ if(kind==='orders')document.querySelectorAll('[data-mf-order]').forEach(b=>b.onclick=()=>{const r=d.rows.find(x=>x.id===Number(b.dataset.mfOrder));el('detail-content').textContent=['会员：'+r.username,'期号：'+r.target_draw,'发送时间（北京时间）：'+beijingTime(r.placed_at),'接收时间（北京时间）：'+beijingTime(r.accepted_at),'开奖时间（北京时间）：'+beijingTime(r.draw_time),'结算时间（北京时间）：'+beijingTime(r.settled_at),'实际跟单：'+r.direction+' '+money(r.stake)+' U','策略：'+r.strategy_name,'合并编号：'+(r.batch_id||'—'),'本期开奖结果：'+(r.total==null?'待开奖':r.total+' '+r.result),'盈亏：'+money(r.pnl)+' U','下注扣款：'+money(r.before_balance)+' → '+money(r.after_stake_balance),'结算返还：'+money(r.before_settle_balance)+' → '+money(r.after_settle_balance)].join('\n');el('detail-dialog').showModal();});
  }catch(e){el(kind+'-error').textContent=e.message;}finally{s.busy=false;}}
  document.querySelectorAll('[data-mf-page]').forEach(b=>b.onclick=()=>{const s=state[b.dataset.mfPage];s.page=({first:1,prev:Math.max(1,s.page-1),next:Math.min(s.pages,s.page+1),last:s.pages})[b.dataset.move];load(b.dataset.mfPage);});
  for(const kind of ['orders','ledger'])el(kind+'-size').onchange=()=>{state[kind].page=1;load(kind);};

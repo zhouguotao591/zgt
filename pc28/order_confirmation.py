@@ -148,6 +148,15 @@ def receive(service, authorization, body):
 
 
 def _apply(c, service, order, wire, status, detail, body):
+        if order['execution_status'] in ('draw_settled','calibrated'):
+            if status in ('executed','unknown'):
+                return {'ok':True,'duplicate':True,'valid':order['execution_status']=='draw_settled'}
+            from .member_orders import reverse_execution
+            reverse_execution(c,order['id'])
+            c.execute('UPDATE robot_execution SET status=?,detail=?,updated=? WHERE outbox_id=?',
+                      (status,detail,utcnow(),order['id']))
+            alert(c,order,status,detail)
+            return {'ok':True,'valid':False}
         if status=='unknown' and detail.strip()==UI_SUBMISSION_ATTEMPTED:
             if order['execution_status']=='submitted':
                 return {'ok':True,'duplicate':True}

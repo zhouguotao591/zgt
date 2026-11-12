@@ -24,7 +24,7 @@ function toast(message) {
   const statuses = {pending:'待开奖',settled:'已记账',void:'已作废'};
   const amount = cents => cents == null ? '—' : (cents/100).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})+' U';
   const rate = value => value == null ? '—' : (value*100).toFixed(2)+'%';
-  const time = value => value ? new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) : '—';
+  const time = value => value ? new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(value)) : '—';
   let page=1, pages=1, orderSequence=0, detailSequence=0, sessionSequence=0, botOptions=[], accountOptions=[];
   let view=['home','orders','me'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'home';
   let retry=()=>verify(true);
@@ -191,7 +191,7 @@ function toast(message) {
     const target=el('mc-order-list');
     if(!rows.length){target.replaceChildren(node('p','没有符合条件的订单'));return;}
     const table=node('table'), head=table.createTHead().insertRow(), body=table.createTBody(), cards=node('div',null,'mc-order-cards');
-    for(const label of ['期号','下单账号','机器人','开奖时间','方向 / 金额','状态','净收益','操作'])head.append(node('th',label));
+    for(const label of ['期号','下单账号','机器人','开奖时间（北京时间）','方向 / 金额','状态','净收益','操作'])head.append(node('th',label));
     for(const r of rows) {
       const direction=r.direction+' / '+amount(r.stake), state=statuses[r.status]||'—', pnl=amount(r.pnl);
       const row=body.insertRow();
@@ -202,7 +202,7 @@ function toast(message) {
       row.insertCell().append(button);
       const card=node('button',null,'mc-order-card');
       card.type='button';
-      card.append(node('strong','第 '+r.target_draw+' 期 · '+state),node('span','开奖时间 '+time(r.draw_time)),node('span',r.account_name+' · '+r.bot_name),node('span',direction+' · 净收益 '+pnl));
+      card.append(node('strong','第 '+r.target_draw+' 期 · '+state),node('span','开奖时间（北京时间） '+time(r.draw_time)),node('span',r.account_name+' · '+r.bot_name),node('span',direction+' · 净收益 '+pnl));
       card.onclick=()=>detail(r.id);
       cards.append(card);
     }
@@ -220,7 +220,7 @@ function toast(message) {
       const result=r.result ? (r.a==null?'':r.a+' + '+r.b+' + '+r.c+' = '+r.total+' · ')+r.result : '—';
       const grid=node('div',null,'mc-metrics');
       fields(grid,[['订单编号','#'+r.id],['期号',r.target_draw],['下单账号',r.account_name],['机器人',r.bot_name],
-        ['开奖时间',time(r.draw_time)],['记账时间',time(r.settled_at)],
+        ['开奖时间（北京时间）',time(r.draw_time)],['记账时间（北京时间）',time(r.settled_at)],
         ['开奖',result],['订单方向',r.direction],['推送金额',amount(r.stake)],['状态',statuses[r.status]||'—'],
         ['结算倍数',r.odds_factor==null?'—':(r.odds_factor/100).toFixed(2)+'×'],['返还',amount(r.credit)],['净收益',amount(r.pnl)]]);
       content.replaceChildren(grid);

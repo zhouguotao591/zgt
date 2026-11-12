@@ -413,12 +413,19 @@ class RobotSignals(Accounts,Platforms):
      except ValueError as error:
       c.execute("UPDATE robot_outbox SET status='cancelled',last_error=?,finished=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",
                 (str(error),utcnow(),batch_id));return True
+    from .member_orders import admit as member_admit
+    funds_reason=member_admit(c,members)
+    if funds_reason:
+     c.execute("UPDATE robot_outbox SET status='cancelled',last_error=?,finished=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",(funds_reason,utcnow(),batch_id))
+     return True
     if row.get('bot_id') is not None:
      risk_reason=robot_risk.admit(c,row['bot_id'],members)
      if risk_reason:
       c.execute("""UPDATE robot_outbox SET status='cancelled',last_error=?,finished=?
                    WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)""",
                 (risk_reason,utcnow(),batch_id));return True
+    c.executemany('INSERT OR IGNORE INTO robot_risk_holds VALUES(?,?,?)',
+                  ((member['id'],member['bot_id'] or 0,member['push_cents']) for member in members))
     order_confirmation.attach(c,wire,members,required,callback_url)
     if required:wire['execution_callback']['platform_id']=row['platform_id']
     c.execute('UPDATE robot_batches SET request=? WHERE id=?',(json.dumps(wire,ensure_ascii=False),batch_id))

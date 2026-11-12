@@ -304,6 +304,41 @@ class MFA:
                 return {'ok': True}
         raise AuthError('管理员动态码无效或已使用，请等待下一组动态码', 401, 'mfa_invalid')
 
+    def unbind_administrator(self, actor, session, body, ip):
+        from .permissions import owner, protect
+        if not owner(self.auth, actor):
+            raise AuthError('仅系统主管理员可解除管理员验证器绑定', 403, 'permission_denied')
+        uid, reason = body.get('id'), body.get('reason')
+        if type(uid) is not int or uid <= 0:
+            raise AuthError('管理员编号无效')
+        if not isinstance(reason, str) or not 1 <= len(reason.strip()) <= 200:
+            raise AuthError('请输入解绑原因（1–200 字）')
+        with self.auth.service.lock, self.auth.db.tx() as c:
+            valid = c.execute("""SELECT u.* FROM web_sessions s JOIN web_users u ON u.id=s.user_id
+                WHERE s.token_hash=? AND s.user_id=? AND s.scope='admin' AND s.mfa_verified=1
+                AND s.expires>? AND u.active=1 AND u.role='admin'""",
+                (session['token_hash'], actor['id'], int(time.time()))).fetchone()
+            if not valid or not owner(self.auth, dict(valid)):
+                raise AuthError('登录状态已变化，请重新登录', 401, 'mfa_expired')
+            target = c.execute("""SELECT * FROM web_users WHERE id=? AND role='admin'
+                AND NOT EXISTS(SELECT 1 FROM web_admin_removed WHERE user_id=web_users.id)""", (uid,)).fetchone()
+            if not target:
+                raise AuthError('管理员不存在', 404)
+            protect(self.auth, dict(target))
+            if uid == actor['id']:
+                raise AuthError('不能通过管理员管理解除自己的绑定', 403)
+            if not c.execute('SELECT 1 FROM web_totp_credentials WHERE user_id=?', (uid,)).fetchone():
+                raise AuthError('该管理员尚未绑定验证器', 409)
+            if self.reauthenticate(c, actor['id'], body.get('code'), ip):
+                self.revoke(c, uid, 'admin')
+                c.execute('DELETE FROM web_mfa_challenges WHERE user_id=?', (uid,))
+                c.execute('DELETE FROM web_totp_credentials WHERE user_id=?', (uid,))
+                c.execute('DELETE FROM web_mfa_recovery_codes WHERE user_id=?', (uid,))
+                self.auth.audit(c, actor['id'], 'administrator_mfa_unbind', uid, ip,
+                                {'reason': reason.strip(), 'before_bound': True, 'after_bound': False})
+                return {'ok': True}
+        raise AuthError('管理员动态码无效或已使用，请等待下一组动态码', 401, 'mfa_invalid')
+
     def local_recovery(self, username, reason):
         with self.auth.db.tx() as c:
             row = c.execute("SELECT id FROM web_users WHERE username=? AND role='admin' AND active=1", (username,)).fetchone()

@@ -93,8 +93,10 @@ def checked_grants(value):
  return sorted(result)
 def listing(service,q):
  from .admin import page_rows
- result=page_rows(service.db,'web_users','id,username,active,created,last_login',q,"role='admin' AND lower(username)!='admin' AND id NOT IN (SELECT user_id FROM web_admin_removed)")
- for r in result['rows']:r['protected']=owner(service.auth,{**r,'role':'admin'})
+ result=page_rows(service.db,'web_users','id,username,active,created,last_login,EXISTS(SELECT 1 FROM web_totp_credentials t WHERE t.user_id=web_users.id) mfa_bound',q,"role='admin' AND lower(username)!='admin' AND id NOT IN (SELECT user_id FROM web_admin_removed)")
+ for r in result['rows']:
+  r['protected']=owner(service.auth,{**r,'role':'admin'})
+  r['mfa_bound']=bool(r['mfa_bound'])
  return result
 
 def manage(service,action,body,user,ip):
@@ -134,6 +136,9 @@ def manage(service,action,body,user,ip):
 def authorize(service,user,method,path,body=None,query=None):
  auth=service.auth;body=body or {};query=query or {}
  from .auth import is_main_admin
+ if path=='/api/admin/administrator-mfa-unbind':
+  if not owner(auth,user):raise AuthError('仅系统主管理员可解除管理员验证器绑定',403,'permission_denied')
+  return
  if path=='/api/admin/robot-notifications':
   if not owner(auth,user):raise AuthError('仅主管理员可管理通知订阅',403,'permission_denied')
   return

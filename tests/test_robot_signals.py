@@ -166,7 +166,11 @@ class RobotTests(unittest.TestCase):
   cfg={**self.r.config(),'account_id':1,'bot_key':3};self.r.save_config(cfg);self.r.save_config({k:v for k,v in cfg.items() if k not in ('account_id','bot_key')});self.assertEqual(self.r.config()['account_id'],1)
   with self.assertRaises(ValueError):self.r.save_config({**cfg,'account_id':-1})
  def member(self,name):
-  with self.s.db.tx() as c:return c.execute("INSERT INTO web_users(username,password_hash,role,created) VALUES(?,'fixture-hash','member',?)",(name,datetime.now(timezone.utc).isoformat())).lastrowid
+  from pc28.member_orders import entry
+  with self.s.db.tx() as c:
+   uid=c.execute("INSERT INTO web_users(username,password_hash,role,created) VALUES(?,'fixture-hash','member',?)",(name,datetime.now(timezone.utc).isoformat())).lastrowid
+   entry(c,uid,'opening',100000,100000,note='测试会员本金')
+   return uid
  def binding(self,uid,ids,account=1,bot=3,enabled=True,base=1000,amounts=None):return self.r.save_binding({'user_id':uid,'account_id':account,'bot_key':bot,'signal_type':'BUY_SYSTEM','enabled':enabled,'strategy_ids':ids,'default_cents':base,'strategy_amounts':amounts or {}})['id']
  def test_member_subscription_isolation_and_batch_per_recipient(self):
   a=self.member('member_a');b=self.member('member_b');self.binding(a,['size','parity'],amounts={'parity':2000});self.binding(b,['parity'],2,4,base=3000);self.permit('size');self.permit('parity');self.order();self.order('parity','双',5100);self.assertEqual(self.r.capture(),3);self.assertEqual(self.r.capture(),0)

@@ -32,7 +32,7 @@ class CalibratedRiskTests(unittest.TestCase):
             self.order(c,uid,bid,1,10000,-10000)
             self.order(c,uid,bid,2,20000)
             risk=robot_risk.save(c,bid,{**self.policy,'calibration_amount':70000,'fixed_stop_balance':20000})
-            self.assertEqual((risk['risk_capital'],risk['net'],risk['available']),(90000,0,70000))
+            self.assertEqual((risk['risk_capital'],risk['net'],risk['available']),(70000,0,70000))
             c.execute("UPDATE member_orders SET status='settled',pnl=20000 WHERE id=2")
             entry(c,uid,'settle',40000,order_id=2)
             risk=robot_risk.check(c,bid)
@@ -83,3 +83,47 @@ class CalibratedRiskTests(unittest.TestCase):
             for field,value in [('calibration_amount',-1),('calibration_amount',True),('fixed_stop_balance',-1),('fixed_stop_balance',1.5)]:
                 with self.assertRaises(ValueError):robot_risk.save(c,bid,{**self.policy,field:value})
             self.assertIsNone(robot_risk.state(c,bid))
+
+    def test_calibration_covers_existing_holds_and_late_settlement(self):
+        uid,bid=self.context()
+        with self.s.db.tx() as c:
+            c.execute("""INSERT INTO robot_outbox(id,event_id,name,event_time,created,request,message,status,attempts,bot_id,push_cents,sent_at)
+                VALUES(901,'calibrated-hold','bot',1,'t','{}','大24490','sent',1,?,2449000,'2026-11-11T12:00:00+00:00')""",(bid,))
+            c.execute('INSERT INTO robot_risk_holds VALUES(901,?,2449000)',(bid,))
+            c.execute("INSERT INTO robot_execution(outbox_id,status,updated,deadline) VALUES(901,'submitted','t',9999999999)")
+            risk=robot_risk.save(c,bid,{**self.policy,'capital':50000000,'calibration_amount':483000,'fixed_stop_balance':450000})
+            self.assertEqual((risk['available'],risk['risk_capital'],risk['held']),(483000,483000,2449000))
+            self.assertFalse(risk['paused'])
+            from pc28.member_orders import reserved
+            c.execute('UPDATE robot_outbox SET member_user_id=? WHERE id=901',(uid,))
+            self.assertEqual(reserved(c,uid),0)
+            self.assertIn('固定余额止损线',robot_risk.admit(c,bid,[{'id':902,'push_cents':33001}]))
+            self.order(c,uid,bid,901,2449000)
+            c.execute('DELETE FROM robot_risk_holds WHERE outbox_id=901')
+            self.assertEqual(robot_risk.state(c,bid)['available'],483000)
+            c.execute("UPDATE member_orders SET status='settled',pnl=-2449000 WHERE id=901")
+            entry(c,uid,'settle',0,order_id=901)
+            self.assertEqual(robot_risk.check(c,bid)['available'],483000)
+            self.assertFalse(robot_risk.state(c,bid)['paused'])
+            c.execute('UPDATE robot_risk SET calibration_revision=0 WHERE bot_id=?',(bid,))
+            robot_risk.migrate(c);robot_risk.migrate(c)
+            self.assertEqual(robot_risk.state(c,bid)['available'],483000)
+
+    def test_member_gate_counts_other_bots_holds_and_retries(self):
+        from pc28.member_orders import admit
+        uid,bid=self.context()
+        with self.s.db.tx() as c:
+            c.execute('UPDATE member_accounts SET balance=10000 WHERE user_id=?',(uid,))
+            for oid,amount in [(901,6000),(902,5000)]:
+                c.execute("""INSERT INTO robot_outbox(id,event_id,name,event_time,created,request,message,status,attempts,bot_id,push_cents,member_user_id)
+                    VALUES(?,?,'bot',1,'t','{}','大10','pending',0,?,?,?)""",(oid,str(oid),bid,amount,uid))
+            rows=c.execute('SELECT * FROM robot_outbox ORDER BY id').fetchall()
+            self.assertIn('余额不足',admit(c,rows))
+            self.assertEqual(admit(c,rows[:1]),'')
+            c.execute('INSERT INTO robot_risk_holds VALUES(901,?,6000)',(bid,))
+            self.assertEqual(admit(c,rows[:1]),'')
+            self.assertIn('余额不足',admit(c,rows[1:]))
+            c.execute('UPDATE member_accounts SET balance=-1 WHERE user_id=?',(uid,))
+            self.assertIn('余额不足',admit(c,rows[:1]))
+            c.execute('UPDATE member_accounts SET balance=0 WHERE user_id=?',(uid,))
+            self.assertIn('余额不足',admit(c,rows[:1]))

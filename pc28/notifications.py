@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 from .bot_secret import SecretStore
 from .model import utcnow
 
-EVENTS = ('order', 'strategy', 'ratio')
+EVENTS = ('order', 'strategy', 'ratio', 'daily_ratio', 'daily_profit')
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notice_subscriptions(
  id INTEGER PRIMARY KEY,name TEXT NOT NULL,chat_id TEXT NOT NULL,
@@ -55,6 +55,52 @@ def hourly_ratios(c, start, end):
     if lines:
         start=start.astimezone(ZoneInfo('Asia/Shanghai'));end=end.astimezone(ZoneInfo('Asia/Shanghai'))
         enqueue(c,'ratio',start.isoformat(),f'每小时开奖占比 · 北京时间 {start:%Y-%m-%d %H:%M}–{end:%H:%M}\n总开奖期数：{n} 期\n大：{row["big"]} 期（{row["big"]/n:.2%}） · 小：{n-row["big"]} 期（{(n-row["big"])/n:.2%}）\n单：{row["odd"]} 期（{row["odd"]/n:.2%}） · 双：{n-row["odd"]} 期（{(n-row["odd"])/n:.2%}）\n'+'\n'.join(lines))
+
+
+def daily_reports(c, start, end):
+    date = start.strftime('%Y-%m-%d')
+    draws = c.execute("""SELECT COUNT(*) n,COALESCE(SUM(size='大'),0) big,
+        COALESCE(SUM(parity='单'),0) odd FROM draws d
+        WHERE julianday(d.draw_utc)>=julianday(?) AND julianday(d.draw_utc)<julianday(?)
+        AND d.verification IN ('full_keno','crosschecked_abc')
+        AND NOT EXISTS(SELECT 1 FROM conflicts x WHERE x.draw_id=d.id AND x.resolved=0)""",
+        (start.isoformat(),end.isoformat())).fetchone()
+    n = draws['n']
+    lines = [f'每日开奖占比 · {date}（北京时间）', f'已核验开奖：{n} 期']
+    for label, count in [('大',draws['big']),('小',n-draws['big']),('单',draws['odd']),('双',n-draws['odd'])]:
+        lines.append(f'{label}：{count} 期 · {count/n if n else 0:.2%}')
+    enqueue(c, 'daily_ratio', date, '\n'.join(lines))
+    rows = c.execute("""SELECT o.target_draw,o.draw_time,COUNT(*) n,SUM(o.stake) stake,
+        SUM(o.pnl) pnl,SUM(o.pnl>0) wins FROM member_orders o
+        LEFT JOIN robot_execution e ON e.outbox_id=o.outbox_id
+        WHERE o.status='settled' AND o.pnl IS NOT NULL AND (e.outbox_id IS NULL OR e.status IN ('executed','draw_settled'))
+        AND julianday(o.draw_time)>=julianday(?) AND julianday(o.draw_time)<julianday(?)
+        GROUP BY o.target_draw,o.draw_time ORDER BY julianday(o.draw_time),o.target_draw""",
+        (start.isoformat(),end.isoformat())).fetchall()
+    count = stake = wins = net = peak = drawdown = 0
+    for row in rows:
+        count += row['n']; stake += row['stake']; wins += row['wins']; net += row['pnl']
+        peak = max(peak, net)
+        drawdown = max(drawdown, peak-net)
+    message = '\n'.join([
+        f'全体会员订单日报 · {date}（北京时间）',
+        f'订单数：{count}', f'总计下单金额：{stake/100:.2f} U',
+        f'盈利金额：{net/100:+.2f} U', f'盈利比：{net/stake if stake else 0:.2%}',
+        f'胜率：{wins/count if count else 0:.2%}', f'最大盈利金额：{peak/100:.2f} U',
+        f'单日最大利润回撤：{drawdown/100:.2f} U',
+        '按开奖日期统计截至推送时已结算的有效会员订单明细。',
+        '盈利比=净盈利/下单金额；胜率=盈利订单数/订单数。',
+        '最大盈利为当日累计净盈利峰值；回撤按每期开奖合计盈亏计算。'])
+    enqueue(c, 'daily_profit', date, message)
+
+
+def schedule_daily(c, now):
+    end = now.astimezone(ZoneInfo('Asia/Shanghai')).replace(hour=0,minute=0,second=0,microsecond=0)
+    today = end.date().isoformat()
+    previous = c.execute('SELECT day FROM notice_daily_state WHERE id=1').fetchone()
+    if previous and previous['day'] < today:
+        daily_reports(c, end-timedelta(days=1), end)
+        c.execute('UPDATE notice_daily_state SET day=? WHERE id=1', (today,))
 
 
 def strategy_alerts(c, cfg, now):
@@ -130,6 +176,15 @@ class Notifications:
                 subscription_id INTEGER NOT NULL, chat_id TEXT NOT NULL, active INTEGER NOT NULL,
                 PRIMARY KEY(subscription_id,chat_id))""")
             c.execute("CREATE UNIQUE INDEX IF NOT EXISTS notice_bot_listener ON notice_subscriptions(bot_id) WHERE mode='bot'")
+            c.execute('CREATE TABLE IF NOT EXISTS notice_daily_state(id INTEGER PRIMARY KEY,day TEXT NOT NULL)')
+            if not c.execute('SELECT 1 FROM notice_daily_state WHERE id=1').fetchone():
+                today=datetime.now(ZoneInfo('Asia/Shanghai')).date().isoformat()
+                c.execute('INSERT INTO notice_daily_state VALUES(1,?)',(today,))
+                for sub in c.execute('SELECT id,events FROM notice_subscriptions').fetchall():
+                    events=set(json.loads(sub['events']))
+                    if 'ratio' in events:events.add('daily_ratio')
+                    if 'order' in events:events.add('daily_profit')
+                    c.execute('UPDATE notice_subscriptions SET events=? WHERE id=?',(json.dumps(sorted(events)),sub['id']))
 
     def secret(self,key):
         secret=SecretStore(self.service.root)
@@ -249,6 +304,7 @@ class Notifications:
     def run(self):
         from .order_confirmation import expire
         hour=None
+        day=None
         next_poll=0
         while not self.service.stop.wait(3):
             try:
@@ -259,11 +315,14 @@ class Notifications:
                 current=now.astimezone(ZoneInfo('Asia/Shanghai')).replace(minute=0,second=0,microsecond=0)
                 with self.service.db.tx() as c:
                     expire(c)
+                    if day!=current.date():
+                        schedule_daily(c,now)
                     if hour!=current and (now.minute!=0 or now.second>=30):
                         if c.execute('SELECT 1 FROM notice_subscriptions WHERE enabled=1').fetchone():
                             hourly_ratios(c,current-timedelta(hours=1),current)
                             strategy_alerts(c,self.service.cfg,now)
                         hour=current
+                day=current.date()
                 self.deliver()
             except Exception as exc:
                 self.service.db.log_job('notifications','error',{'error_type':type(exc).__name__})

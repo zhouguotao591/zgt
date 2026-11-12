@@ -256,6 +256,8 @@ class Handler(BaseHTTPRequestHandler):
     authorize(s,user,'POST',p,body)
    if self.admin_scope and p=='/api/admin/robot-notifications':
     self.send(200,s.notifications.save(body,user,ip));return
+   if self.admin_scope and p=='/api/admin/administrator-mfa-unbind':
+    self.send(200,auth.mfa.unbind_administrator(user,session,body,ip));return
    if self.admin_scope and p in ('/api/admin/member-mfa-policy','/api/admin/member-mfa-unbind'):
     self.send(200,auth.mfa.manage_member(p.rsplit('/',1)[-1],user,session,body,ip));return
    if p in ('/api/admin/administrator-create','/api/admin/administrator-control','/api/admin/administrator-password','/api/admin/administrator-delete','/api/admin/permissions-save'):

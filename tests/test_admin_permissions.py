@@ -154,4 +154,29 @@ class PermissionTests(unittest.TestCase):
   self.assertEqual(self.admin.call('/api/admin/administrator-delete',{'id':uid})[0],200);r=self.s.db.query('SELECT role,active FROM web_users WHERE id=?',(uid,))[0];self.assertEqual(r,{'role':'admin','active':0})
   events=self.s.db.query('SELECT action,details FROM web_auth_events WHERE target=?',(str(uid),));self.assertTrue(any(r['action']=='permissions_save' for r in events));self.assertNotIn('new-operator-password',str(events))
 
+ def test_owner_unbinds_administrator_mfa_and_requires_reenrollment(self):
+  self.setup();uid=self.create();operator=self.login()
+  old_secret=operator.totp_secret
+  path='/api/admin/administrator-mfa-unbind'
+  body={'id':uid,'reason':'管理员更换手机','code':self.admin.totp(1)}
+  self.assertEqual(operator.call(path,body)[0],403)
+  owner_id=self.s.db.query("SELECT user_id FROM web_admin_owners")[0]['user_id']
+  self.assertEqual(self.admin.call(path,{**body,'id':owner_id})[0],403)
+  self.assertEqual(self.admin.call(path,{**body,'reason':''})[0],400)
+  self.assertEqual(self.admin.call(path,{**body,'code':'123'})[0],401)
+  listed=self.admin.call('/api/admin/administrators')[1]['rows']
+  self.assertTrue(next(r for r in listed if r['id']==uid)['mfa_bound'])
+  code,result=self.admin.call(path,body);self.assertEqual(code,200,result)
+  self.assertEqual(self.s.db.query('SELECT * FROM web_totp_credentials WHERE user_id=?',(uid,)),[])
+  self.assertEqual(self.s.db.query('SELECT * FROM web_mfa_recovery_codes WHERE user_id=?',(uid,)),[])
+  self.assertEqual(operator.call('/api/admin/access')[0],401)
+  self.assertEqual(self.admin.call(path,body)[0],409)
+  operator.session()
+  status,data=operator.authenticate('login',username='operator01',password='operator-password-123')
+  self.assertEqual((status,data['status']),(200,'mfa_enroll_required'))
+  self.assertEqual(operator.complete_enrollment()[0],200)
+  self.assertNotEqual(operator.totp_secret,old_secret)
+  events=self.s.db.query("SELECT details FROM web_auth_events WHERE action='administrator_mfa_unbind'")
+  self.assertEqual(len(events),1);self.assertNotIn(body['code'],events[0]['details'])
+
 if __name__=='__main__':unittest.main()

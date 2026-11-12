@@ -53,13 +53,40 @@ def initialize(service):
    settle(c)
    c.execute("INSERT INTO member_finance_migrations VALUES('initial-members-v1',?)",(utcnow(),))
 
-def import_signal(c,service,row,batch_id,placed_at,accepted_at):
- if row['is_test'] or c.execute('SELECT 1 FROM member_orders WHERE outbox_id=?',(row['id'],)).fetchone():return
+def member_id(c,row):
  binding=c.execute('SELECT user_id FROM robot_bindings WHERE id=?',(row['recipient_id'],)).fetchone()
  frozen_uid=row['member_user_id'] if 'member_user_id' in row.keys() else None
  if not frozen_uid:
   original=c.execute('SELECT id FROM web_users WHERE username=?',(row['recipient_name'],)).fetchone()
   frozen_uid=original['id'] if original else binding['user_id'] if binding else None
+ return frozen_uid
+
+def reserved(c,uid):
+ return c.execute('''SELECT COALESCE(SUM(h.stake),0) FROM robot_risk_holds h JOIN robot_outbox o ON o.id=h.outbox_id
+   WHERE COALESCE(o.member_user_id,(SELECT id FROM web_users WHERE username=o.recipient_name),
+    (SELECT user_id FROM robot_bindings WHERE id=o.recipient_id))=?
+   AND NOT EXISTS(SELECT 1 FROM member_orders m WHERE m.outbox_id=h.outbox_id)
+   AND NOT EXISTS(SELECT 1 FROM robot_calibration_orders s JOIN robot_risk r ON r.bot_id=s.bot_id
+    WHERE s.bot_id=h.bot_id AND s.outbox_id=h.outbox_id AND r.calibration_amount IS NOT NULL)''',(uid,)).fetchone()[0]
+
+def admit(c,rows):
+ grouped={}
+ for row in rows:
+  uid=member_id(c,row)
+  if not uid:return '无法核验会员账号，停止下单'
+  if type(row['push_cents']) is not int or row['push_cents']<=0:return '无法核验会员订单金额'
+  extra=0 if c.execute('SELECT 1 FROM robot_risk_holds WHERE outbox_id=?',(row['id'],)).fetchone() else row['push_cents']
+  grouped[uid]=grouped.get(uid,0)+extra
+ for uid,extra in grouped.items():
+  account=c.execute('SELECT balance FROM member_accounts WHERE user_id=?',(uid,)).fetchone()
+  held=reserved(c,uid)
+  if not account or account['balance']<=0 or account['balance']-held<extra:
+   return '会员可用余额不足，停止下单（已扣除其他机器人在途占用）'
+ return ''
+
+def import_signal(c,service,row,batch_id,placed_at,accepted_at):
+ if row['is_test'] or c.execute('SELECT 1 FROM member_orders WHERE outbox_id=?',(row['id'],)).fetchone():return
+ frozen_uid=member_id(c,row)
  if not frozen_uid:return
  match=re.fullmatch(r'(大|小|单|双)(\d+(?:\.\d{1,2})?)',row['message'].strip())
  if not match:raise ValueError('会员订单无法识别推送方向与金额')
@@ -74,6 +101,43 @@ def import_signal(c,service,row,batch_id,placed_at,accepted_at):
  cur=c.execute('INSERT INTO member_orders(user_id,outbox_id,batch_id,platform_id,strategy_name,target_draw,direction,stake,placed_at,accepted_at,odds_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid,row['id'],batch_id,row['platform_id'],row['strategy_name'],row['target_draw'],match[1],stake,placed_at,accepted_at,json.dumps(odds)))
  c.execute('UPDATE member_orders SET follow_account_id=?,bot_id=? WHERE id=?',(row['follow_account_id'] if 'follow_account_id' in row.keys() else None,row['bot_id'] if 'bot_id' in row.keys() else None,cur.lastrowid))
  entry(c,uid,'stake',-stake,order_id=cur.lastrowid,note='接收端成功接收跟单信号',created=accepted_at)
+
+def settle_sent(c, service):
+ rows=c.execute("""SELECT o.*,i.batch_id,b.request batch_request,d.draw_utc,
+  r.calibration_amount,r.calibrated_at FROM robot_execution e
+  JOIN robot_outbox o ON o.id=e.outbox_id JOIN robot_batch_items i ON i.outbox_id=o.id
+  JOIN robot_batches b ON b.id=i.batch_id JOIN draws d ON d.id=o.target_draw
+  LEFT JOIN robot_risk r ON r.bot_id=o.bot_id
+  WHERE e.status='submitted' AND o.status='sent' AND o.is_test=0
+  AND julianday(d.draw_utc)<=julianday(?) AND d.verification IN ('full_keno','crosschecked_abc')
+  AND NOT EXISTS(SELECT 1 FROM conflicts x WHERE x.draw_id=d.id AND x.resolved=0)
+  ORDER BY d.draw_utc,o.id""",(utcnow(),)).fetchall()
+ for row in rows:
+  wire=json.loads(row['batch_request'])
+  sent=row['sent_at']
+  if not sent or datetime.fromisoformat(sent).timestamp()>=wire.get('expires_at',0):continue
+  calibrated=(row['calibration_amount'] is not None and row['calibrated_at']
+              and datetime.fromisoformat(row['draw_utc'])<=datetime.fromisoformat(row['calibrated_at'])
+              and c.execute('SELECT 1 FROM robot_calibration_orders WHERE bot_id=? AND outbox_id=?',
+                            (row['bot_id'],row['id'])).fetchone())
+  if calibrated:
+   status,detail='calibrated','已在最近校准前开奖，释放占用，历史盈亏按校准金额处理'
+  else:
+   import_signal(c,service,row,row['batch_id'],sent,row['accepted_at'] or sent)
+   if not c.execute('SELECT 1 FROM member_orders WHERE outbox_id=?',(row['id'],)).fetchone():continue
+   status,detail='draw_settled','已成功接收并提交，按实际开奖结果自动结算'
+  c.execute('UPDATE robot_execution SET status=?,detail=?,updated=? WHERE outbox_id=?',
+            (status,detail,utcnow(),row['id']))
+  c.execute('DELETE FROM robot_risk_holds WHERE outbox_id=?',(row['id'],))
+
+def reverse_execution(c,outbox_id):
+ order=c.execute('SELECT * FROM member_orders WHERE outbox_id=?',(outbox_id,)).fetchone()
+ if not order or order['outcome']=='execution_rejected':return
+ amount=-order['pnl'] if order['status']=='settled' else order['stake'] if order['status']=='pending' else 0
+ entry(c,order['user_id'],'execution_reversal',amount,order_id=order['id'],note='自动结算后接收端报告执行异常，冲正该笔订单')
+ c.execute("UPDATE member_orders SET status='void',pnl=0,outcome='execution_rejected' WHERE id=?",(order['id'],))
+ if order['bot_id'] is not None:
+  c.execute("UPDATE robot_risk SET paused='自动结算后收到执行异常，请核对资金并校准后人工恢复' WHERE bot_id=?",(order['bot_id'],))
 
 def settle(c,until=None):
  until=until or utcnow()
@@ -93,6 +157,7 @@ def settle(c,until=None):
 def sync(service):
  with service.lock,service.db.tx() as c:
   c.execute("INSERT OR IGNORE INTO member_accounts(user_id) SELECT id FROM web_users WHERE role='member'")
+  settle_sent(c,service)
   settle(c)
 
 def users(service,q,user=None):
@@ -125,7 +190,7 @@ def adjust(service,body,user,ip):
    return {'ok':True}
   if not c.execute("SELECT 1 FROM web_users WHERE id=? AND role='member'",(uid,)).fetchone():raise ValueError('只能调整会员额度')
   c.execute('INSERT OR IGNORE INTO member_accounts(user_id) VALUES(?)',(uid,));a=c.execute('SELECT * FROM member_accounts WHERE user_id=?',(uid,)).fetchone()
-  if a['principal']+delta<0 or (delta<0 and a['balance']+delta<0):raise ValueError('减少金额不能超过当前本金或可用余额')
+  if a['principal']+delta<0 or (delta<0 and a['balance']+delta-reserved(c,uid)<0):raise ValueError('减少金额不能超过当前本金或扣除在途占用后的可用余额')
   entry(c,uid,'adjust',delta,delta,actor=user['id'],note=note.strip(),request_id=rid)
   service.auth.audit(c,user['id'],'member_capital_adjust',uid,ip,{'amount_cents':delta,'before_cents':a['balance'],'after_cents':a['balance']+delta,'note':note.strip(),'request_id':rid})
  return {'ok':True}

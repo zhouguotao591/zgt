@@ -92,6 +92,21 @@ class ConfirmationTests(unittest.TestCase):
         self.assertEqual(self.s.db.query('SELECT * FROM robot_risk_holds'),[])
         self.assertEqual(len(self.s.db.query('SELECT * FROM member_orders')),2)
 
+    def test_insufficient_member_balance_blocks_before_transport(self):
+        self.permit('size');self.order('size');self.r.capture();self.ready()
+        now=datetime.now(timezone.utc);previous=now-timedelta(seconds=50)
+        self.s.db.import_records([{'id':998,'time':previous.isoformat(),'numbers':list(range(1,21))}],'test')
+        with self.s.db.tx() as c:
+            c.execute('UPDATE member_accounts SET balance=0')
+            plan={'next_draw_id':999,'next_draw_at':(previous+timedelta(seconds=210)).isoformat()}
+            c.execute("INSERT OR REPLACE INTO runtime_state VALUES('draw_timer',?,?)",(json.dumps(plan),now.isoformat()))
+        with patch('pc28.maintenance.live_guard',return_value=''),patch('pc28.robot_signals.urllib.request.build_opener') as opener:
+            self.assertTrue(self.r.deliver_one())
+            opener.assert_not_called()
+        row=self.s.db.query('SELECT status,last_error,attempts FROM robot_outbox')[0]
+        self.assertEqual((row['status'],row['attempts']),('cancelled',0))
+        self.assertIn('会员可用余额不足',row['last_error'])
+
     def test_missing_callback_alerts_once_and_never_books_order(self):
         with self.s.db.tx() as c:
             c.execute("INSERT INTO robot_outbox(event_id,name,event_time,created,request,message,status) VALUES('test','bot',1,'t','{}','大10','sent')")
