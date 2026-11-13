@@ -36,6 +36,30 @@ def daily_summary(rows):
   item['start']=min(item['start'],clock);item['end']=max(item['end'],clock)
  return [days[day] for day in sorted(days,reverse=True)]
 
+def period_summaries(rows):
+ """Half-open Beijing calendar buckets, independent of the displayed draw window."""
+ groups={key:{} for key in ('hour','four_hour','week')};weeks={}
+ for row in rows:
+  clock=row['beijing_time'];day=row['date'];hour=int(clock[11:13])
+  if day not in weeks:
+   date=datetime.strptime(day,'%Y-%m-%d');weeks[day]=(date-timedelta(days=date.weekday())).strftime('%Y-%m-%d')
+  keys={'hour':f'{day} {hour:02d}:00:00','four_hour':f'{day} {hour//4*4:02d}:00:00','week':weeks[day]+' 00:00:00'}
+  for kind,key in keys.items():
+   if key not in groups[kind]:
+    start=datetime.strptime(key,'%Y-%m-%d %H:%M:%S').replace(tzinfo=BJ)
+    end=start+timedelta(hours={'hour':1,'four_hour':4,'week':168}[kind])
+    groups[kind][key]={'start_at':start.isoformat(),'end_at':end.isoformat(),'count':0,'大':0,'小':0,'单':0,'双':0,'first_record':clock,'last_record':clock}
+   item=groups[kind][key];item['count']+=1;item[row['size']]+=1;item[row['parity']]+=1
+   item['first_record']=min(item['first_record'],clock);item['last_record']=max(item['last_record'],clock)
+ return {kind:[items[key] for key in sorted(items,reverse=True)] for kind,items in groups.items()}
+
+def summary_page(items,q,kind,now):
+ size=int(q.get(kind+'_size',10))
+ if size not in (10,20,50,100):raise ValueError('汇总每页须为10、20、50或100条')
+ pages=max(1,math.ceil(len(items)/size));page=max(1,min(pages,int(q.get(kind+'_page',1))))
+ rows=[{**r,'ongoing':r['start_at']<=now.isoformat()<r['end_at']} for r in items[(page-1)*size:page*size]]
+ return {'rows':rows,'page':page,'pages':pages,'page_size':size,'total':len(items),'as_of':now.isoformat()}
+
 def metrics(rows,group):
  definitions=GROUPS[group];keys=[k for _,ks in definitions for k in ks];last={};seen_last={};counts=Counter();max_miss=Counter();gap_run=Counter();segment_start=0
  for i,r in enumerate(rows):
@@ -122,12 +146,12 @@ def analyze_number(rows,n):
  return {'number':n,'hits':hits,'rate':p,'theory':theory,'average_interval':mean,'current_omission':miss,'current_omission_at_least':last_index<segment_start,'min_interval':min(intervals) if intervals else None,'max_interval':max(intervals) if intervals else None,'successor_count':M,'repeat_rate':next_sums[n]/M if M else None,'same_tail_rate':sum(r['total']%10==n%10 for r in after)/M if M else None,'neighbor_rate':sum(abs(r['total']-n)==1 for r in after)/M if M else None,'next_attributes':next_attrs,'abc':abc,'recovery_threshold':threshold,'recovery':recovery,'before':top(prev),'after':top(next_sums),'tails':top(tails),'deviation':deviation,'curve':curve,'note':'频率分母为所选窗口；后续统计仅使用有相邻下一期的命中，末期无后续不计。参考分布按三球独立且0—9均匀计算，不代表已验证Keno换算的精确理论分布，也不是未来预测。回补分母排除未观察完整时长且尚未命中的尾段。'}
 
 class Tools:
- def __init__(self,service):self.service=service;self.lock=threading.RLock();self.key=None;self.rows=[];self.daily=[];self.cache={}
+ def __init__(self,service):self.service=service;self.lock=threading.RLock();self.key=None;self.rows=[];self.daily=[];self.periods=None;self.cache={}
  def snapshot(self):
   db=self.service.db;stat=db.query("SELECT COUNT(*) n,MAX(id) last,SUM(verification='crosschecked_abc') pending FROM draws")[0];rev=db.query('SELECT MAX(id) id FROM revisions')[0]['id'];zone=self.service.cfg['collector'].get('source_timezone') or 'America/Vancouver';key=(stat['n'],stat['last'],stat['pending'],rev,zone)
   with self.lock:
    if key!=self.key:
-    raw=db.query('SELECT id,source_time,draw_utc,a,b,c,total,size,parity,numbers,verification,source FROM draws ORDER BY id');self.rows=[enrich(r,ZoneInfo(zone)) for r in raw];self.daily=daily_summary(self.rows);self.key=key;self.cache={}
+    raw=db.query('SELECT id,source_time,draw_utc,a,b,c,total,size,parity,numbers,verification,source FROM draws ORDER BY id');self.rows=[enrich(r,ZoneInfo(zone)) for r in raw];self.daily=daily_summary(self.rows);self.periods=None;self.key=key;self.cache={}
    return self.rows
  def run(self,q):
   view=q.get('view','home');limit=int(q.get('limit',40 if view=='trend' else 500));page=int(q.get('page',1));group=q.get('group','regular')
@@ -141,6 +165,9 @@ class Tools:
   else:
    with self.lock:
     allrows=self.snapshot();daily=self.daily
+    if view=='home':
+     if self.periods is None:self.periods=period_summaries(allrows)
+     periods=self.periods
   rows=allrows[-limit:] if limit else allrows
   if view=='home' and q.get('date'):
    selected=datetime.strptime(q['date'],'%Y-%m-%d').date().isoformat()
@@ -161,6 +188,7 @@ class Tools:
     pages=max(1,math.ceil(len(daily)/day_size));day_page=max(1,min(pages,int(q.get('daily_page',1))))
     base['daily']={'rows':daily[(day_page-1)*day_size:day_page*day_size],'page':day_page,'pages':pages,'page_size':day_size,
                    'total':len(daily),'today':datetime.now(BJ).date().isoformat()}
+    now=datetime.now(BJ);base['summaries']={kind:summary_page(items,q,kind,now) for kind,items in periods.items()}
    if view=='trend':
     base['current']=metrics(rows,'regular');base['series']=[{k:r[k] for k in ('id','size','parity','combo','dragon')} for r in rows]
    return base

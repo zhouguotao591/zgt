@@ -3,7 +3,7 @@
  const el=id=>document.getElementById(id), E=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const count=x=>x==null?'—':Number(x).toLocaleString('zh-CN',{maximumFractionDigits:2}), percent=x=>x==null?'—':(x*100).toFixed(2)+'%';
  const colors=['#1976d2','#e34b51','#7e57c2','#f3a328'];const colorFor=v=>({'大':'#e34b51','小':'#1976d2','单':'#1976d2','双':'#e34b51','大单':'#7e57c2','大双':'#e34b51','小单':'#1976d2','小双':'#f3a328','龙':'#e34b51','虎':'#1976d2','合':'#7e57c2'})[v]||'#1976d2';
- const state={home:{page:1,daily_page:1,daily_size:10,date:'',limit:1000,q:'',mode:'result'},trend:{page:1,limit:40,q:'',mode:'text'},dragon:{limit:2000,minimum:5,kind:'all'},missing:{limit:0,group:'regular'},stats:{group:'regular'},analysis:{limit:20000,number:13}};
+ const state={home:{page:1,hour_page:1,hour_size:10,four_hour_page:1,four_hour_size:10,week_page:1,week_size:10,daily_page:1,daily_size:10,date:'',limit:1000,q:'',mode:'result'},trend:{page:1,limit:40,q:'',mode:'text'},dragon:{limit:2000,minimum:5,kind:'all'},missing:{limit:0,group:'regular'},stats:{group:'regular'},analysis:{limit:20000,number:13}};
  const cache={},pending={},versions={},failed={};let current='home',status=null,lastDraw=0,statusKey='';
  const mark=(v)=>`<span class="draw-tag ${['大','双','大双','龙','极大'].includes(v)?'warm':['顺子','豹子','合'].includes(v)?'purple':'cool'}">${E(v)}</span>`;
  const formula=r=>`<b class="formula">${r.a} + ${r.b} + ${r.c} = <strong>${r.total}</strong></b>`;
@@ -21,6 +21,7 @@
   el('home-day-filter').hidden=!state.home.date;
   el('home-day-label').textContent=state.home.date?state.home.date+' 的开奖记录（北京时间）':'';
   if(d.daily)renderDaily(d.daily);
+  for(const kind of ['hour','four_hour','week'])if(d.summaries?.[kind])renderPeriod(kind,d.summaries[kind]);
 
  }
  function selectDay(day){
@@ -44,18 +45,21 @@
    ['记录覆盖时间',r=>E(r.start)+'–'+E(r.end)]
   ],daily.rows);
   el('home-daily-table').querySelectorAll('[data-day]').forEach(button=>button.onclick=()=>selectDay(button.dataset.day));
-  const controls=el('home-daily-pager');
+  summaryPager('daily',daily);
+ }
+ function summaryPager(kind,daily){
+  const controls=el('home-'+kind+'-pager');
   controls.replaceChildren();
   const pageSize=document.createElement('select'),sizeLabel=document.createElement('label');
   for(const size of [10,20,50,100])pageSize.add(new Option(size+' 条',size,false,size===daily.page_size));
-  pageSize.onchange=()=>{state.home.daily_size=Number(pageSize.value);state.home.daily_page=1;load('home');};
+  pageSize.onchange=()=>{state.home[kind+'_size']=Number(pageSize.value);state.home[kind+'_page']=1;load('home');};
   sizeLabel.append('每页 ',pageSize);
   const first=document.createElement('button'),prev=document.createElement('button');
   const next=document.createElement('button'),last=document.createElement('button'),label=document.createElement('span');
   for(const [button,text,target] of [[first,'首页',1],[prev,'上一页',daily.page-1],[next,'下一页',daily.page+1],[last,'尾页',daily.pages]]){
    button.type='button';button.className='secondary';button.textContent=text;
    button.disabled=target===daily.page||target<1||target>daily.pages;
-   button.onclick=()=>{state.home.daily_page=target;load('home');};
+   button.onclick=()=>{state.home[kind+'_page']=target;load('home');};
   }
   label.textContent=daily.page+' / '+daily.pages;
   controls.append(sizeLabel,first,prev,label,next,last);
@@ -63,6 +67,18 @@
  el('home-day-clear').onclick=()=>selectDay('');
  function lineChart(series,labels,reference=null,description='占比'){if(!series.length)return '<div class="empty">没有可绘制数据</div>';const W=1000,H=260,L=48,R=984,T=16,B=222;const x=i=>L+i*(R-L)/Math.max(1,series.length-1),y=v=>B-v*(B-T);const paths=labels.map((_,j)=>series.map((r,i)=>`${i&&!r.breakBefore?'L':'M'}${x(i).toFixed(1)},${y(r.values[j]).toFixed(1)}`).join(' '));const ticks=[...new Set([0,Math.floor((series.length-1)/2),series.length-1])];return `<svg viewBox="0 0 ${W} ${H}" class="tool-chart road-ratio-chart" role="img" aria-label="${E(description)}">${[0,.25,.5,.75,1].map(v=>`<line x1="${L}" y1="${y(v)}" x2="${R}" y2="${y(v)}" stroke="#e0e7f0"/><text x="5" y="${y(v)+4}" fill="#61738b" font-size="12">${v*100}%</text>`).join('')}<line x1="${L}" y1="${T}" x2="${L}" y2="${B}" stroke="#d6e0ee"/>${paths.map((path,j)=>`<path d="${path}" fill="none" stroke="${colorFor(labels[j])}" stroke-width="2.2" stroke-linejoin="round"/>`).join('')}${reference==null?'':`<line x1="${L}" y1="${y(reference)}" x2="${R}" y2="${y(reference)}" stroke="#61738b" stroke-width="1.8" stroke-dasharray="5 4" stroke-linecap="round"/>`}${ticks.map(i=>`<text x="${x(i)}" y="250" text-anchor="${i===0?'start':i===series.length-1?'end':'middle'}" fill="#8294a9" font-size="11">${series[i].id}</text>`).join('')}</svg>`;}
 
+ function renderPeriod(kind,d){
+  const labels={hour:'小时',four_hour:'4小时区间',week:'七日区间'};
+  el('home-'+kind+'-count').textContent='共 '+count(d.total)+' 个有记录的'+labels[kind];
+  function interval(r){const start=r.start_at.slice(0,16).replace('T',' '),end=r.end_at.slice(0,16).replace('T',' ');if(kind==='week'){const date=new Date(r.end_at.slice(0,10)+'T00:00:00Z');date.setUTCDate(date.getUTCDate()-1);return r.start_at.slice(0,10)+' ～ '+date.toISOString().slice(0,10);}return start+' ～ '+(start.slice(0,10)===end.slice(0,10)?end.slice(11):end);}
+  table('home-'+kind+'-table',[
+   ['统计区间（北京）',r=>'<span class="home-summary-range">'+E(interval(r))+'</span>'+(r.ongoing?'<small class="home-summary-live">进行中</small>':'')],
+   ['已采集',r=>count(r.count)+' 期'],
+   ...['大','小','单','双'].map(side=>[side+' · 次数 / 占比',r=>count(r[side])+' / '+percent(r.count?r[side]/r.count:null)]),
+   ['记录覆盖时间',r=>E(kind==='week'?r.first_record+' ～ '+r.last_record:r.first_record.slice(11)+'–'+r.last_record.slice(11))]
+  ],d.rows);
+  summaryPager(kind,d);
+ }
  function trend(d){el('trend-coverage').textContent=scope(d);const graph=state.trend.mode==='graph';el('trend-dimensions').hidden=!graph;el('trend-search-form').hidden=graph;el('trend-text').hidden=graph;el('trend-pager').hidden=graph;el('trend-graph').hidden=!graph;
   if(!graph){const labels=['小','大','单','双','小单','小双','大单','大双','小边','中','大边','龙','合','虎'];const hits=(r,k)=>[r.size,r.parity,r.combo,r.position,r.dragon].includes(k);table('trend-text',[['期号','id'],['开奖号码',formula],['类型',r=>mark(r.shape)],...labels.map(k=>[k,r=>hits(r,k)?mark(k):''])],d.rows);const items=d.current.flatMap(g=>g.items);const header=el('trend-text').querySelector('tbody');if(header)header.insertAdjacentHTML('afterbegin',`<tr class="omission-row"><td>未开间隔</td><td></td><td></td>${labels.map(k=>`<td>${items.find(x=>x.key===k)?.current??'—'}</td>`).join('')}</tr>`);pager('trend-pager','trend',d);return;}
   const picked=new Set([...el('trend-dimensions').querySelectorAll('input:checked')].map(x=>x.value));
@@ -82,6 +98,9 @@
  function selectBar(id,attribute,callback){el(id).querySelectorAll('button').forEach(b=>b.onclick=()=>{el(id).querySelectorAll('button').forEach(x=>x.classList.remove('selected'));b.classList.add('selected');callback(b.dataset[attribute]);});}
  function goNumber(n){state.analysis.number=n;document.querySelector('[data-tab="analysis"]').click();}
  el('number-picker').innerHTML=Array.from({length:28},(_,n)=>`<button type="button" data-number="${n}" ${n===13?'class="selected"':''}>${String(n).padStart(2,'0')}</button>`).join('');el('number-picker').querySelectorAll('button').forEach(b=>b.onclick=()=>{state.analysis.number=Number(b.dataset.number);load('analysis');});
+ const summaryButtons=[...el('home-summary-tabs').querySelectorAll('[data-summary]')];
+ function selectSummary(kind){for(const button of summaryButtons){const selected=button.dataset.summary===kind;button.classList.toggle('selected',selected);button.setAttribute('aria-selected',String(selected));button.tabIndex=selected?0:-1;el('home-summary-'+button.dataset.summary).hidden=!selected;}}
+ for(const button of summaryButtons){button.onclick=()=>selectSummary(button.dataset.summary);button.onkeydown=e=>{const index=summaryButtons.indexOf(button);const next=e.key==='ArrowRight'?(index+1)%4:e.key==='ArrowLeft'?(index+3)%4:e.key==='Home'?0:e.key==='End'?3:null;if(next===null)return;e.preventDefault();selectSummary(summaryButtons[next].dataset.summary);summaryButtons[next].focus();};}
  selectBar('home-modes','mode',m=>{state.home.mode=m;if(cache.home)home(cache.home);});selectBar('trend-modes','mode',m=>{state.trend.mode=m;if(cache.trend)trend(cache.trend);});selectBar('dragon-kinds','kind',kind=>{state.dragon.kind=kind;load('dragon');});
  for(const v of ['missing','stats'])selectBar(v+'-groups','group',group=>{state[v].group=group;load(v);});
  for(const v of ['trend','missing'])el(v+'-limit').onchange=()=>{state[v].limit=Number(el(v+'-limit').value);state[v].page=1;load(v);};

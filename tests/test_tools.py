@@ -1,10 +1,40 @@
 import unittest
 from zoneinfo import ZoneInfo
-from pc28.tools import enrich,metrics,analyze_number,detect_dragons,coverage,daily_summary,Tools
+from pc28.tools import enrich,metrics,analyze_number,detect_dragons,coverage,daily_summary,period_summaries,summary_page,Tools,BJ
+from datetime import datetime
 
 def row(id,total=13,a=5,b=1,c=7):
  return enrich({'id':id,'source_time':'2026-01-01T00:00:00','draw_utc':'2026-01-01T16:30:00+00:00','a':a,'b':b,'c':c,'total':total,'size':'大' if total>=14 else '小','parity':'单' if total%2 else '双','numbers':'null','source':'test','verification':'crosschecked_abc'},ZoneInfo('America/Vancouver'))
 class ToolTests(unittest.TestCase):
+ def period_rows(self):
+  stamps=['2026-11-08 23:59:59','2026-11-09 00:00:00','2026-11-09 03:59:59','2026-11-09 04:00:00','2026-11-10 00:00:00']
+  return [{**row(i,13 if i%2 else 14),'date':stamp[:10],'beijing_time':stamp} for i,stamp in enumerate(stamps,1)]
+ def test_home_period_boundaries_and_denominators(self):
+  result=period_summaries(self.period_rows())
+  self.assertEqual({k:len(v) for k,v in result.items()},{'hour':5,'four_hour':4,'week':2})
+  first=next(r for r in result['four_hour'] if r['start_at'].startswith('2026-11-09T00:00'))
+  self.assertEqual((first['count'],first['大'],first['小'],first['单'],first['双']),(2,1,1,1,1))
+  self.assertTrue(first['end_at'].startswith('2026-11-09T04:00'))
+  self.assertEqual((result['week'][0]['count'],result['week'][1]['count']),(4,1))
+  for items in result.values():
+   self.assertEqual(sum(r['count'] for r in items),5)
+   for r in items:self.assertEqual(r['大']+r['小'],r['count']);self.assertEqual(r['单']+r['双'],r['count'])
+ def test_summary_pages_are_independent_of_search_and_draw_window(self):
+  rows=self.period_rows();tools=Tools(None);tools.daily=daily_summary(rows);tools.snapshot=lambda:rows
+  result=tools.run({'view':'home','limit':'1','date':'2026-11-08','q':'1'})
+  self.assertEqual(result['total'],1);self.assertEqual(result['daily']['total'],3)
+  self.assertEqual(sum(r['count'] for r in result['summaries']['hour']['rows']),5)
+  self.assertEqual(result['summaries']['week']['total'],2)
+  with self.assertRaises(ValueError):tools.run({'view':'home','hour_size':'3'})
+ def test_summary_paging_empty_and_ongoing_half_open(self):
+  items=period_summaries(self.period_rows())['four_hour'];now=datetime(2026,11,9,4,tzinfo=BJ)
+  result=summary_page(items,{'four_hour_page':'99'},'four_hour',now)
+  self.assertEqual((result['page'],result['pages']),(1,1))
+  self.assertTrue(next(r for r in result['rows'] if r['start_at'].startswith('2026-11-09T04:00'))['ongoing'])
+  self.assertFalse(next(r for r in result['rows'] if r['start_at'].startswith('2026-11-09T00:00'))['ongoing'])
+  self.assertEqual(summary_page([],{},'hour',now)['rows'],[])
+  many=items*6;result=summary_page(many,{'hour_size':'10','hour_page':'999'},'hour',now)
+  self.assertEqual((result['page'],result['pages'],len(result['rows'])),(3,3,4))
  def test_home_daily_summary_counts_and_filters_old_dates(self):
   rows=[{**row(1,13),'date':'2026-01-01','beijing_time':'2026-01-01 23:59:00'},
         row(2,14),{**row(3,15),'beijing_time':'2026-01-02 01:00:00'}]

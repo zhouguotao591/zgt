@@ -56,7 +56,7 @@ function loadSession(){
 }
 window.pc28LoadSession=loadSession;
 setInterval(refresh,5000);setInterval(updateCountdown,1000);
-(async()=>{try{token=(await loadSession()).token;await loadConfig();await refresh();const params=new URLSearchParams(location.search),view=params.get('view');if(['home','trend','dragon','missing','stats','analysis','ai-analysis','algorithm-hall','strategy-center'].includes(view)){if(['algorithm-hall','strategy-center'].includes(view)&&document.body.dataset.authenticated==='0'){if(!document.getElementById('member-auth-dialog')?.open)window.pc28Auth?.open('login',view);}else document.querySelector('[data-tab="'+view+'"]')?.click();}}catch(e){toast(e.message);}})();
+(async()=>{try{token=(await loadSession()).token;await loadConfig();await refresh();const params=new URLSearchParams(location.search),view=params.get('view');if(['home','trend','dragon','missing','stats','analysis','ai-analysis','algorithm-hall','strategy-center'].includes(view)&&document.querySelector('[data-tab="'+view+'"]')){if(['algorithm-hall','strategy-center'].includes(view)&&document.body.dataset.authenticated==='0'){if(!document.getElementById('member-auth-dialog')?.open)window.pc28Auth?.open('login',view);}else document.querySelector('[data-tab="'+view+'"]')?.click();}}catch(e){toast(e.message);}})();
 
 if($('conflict-form'))$('conflict-form').onsubmit=guarded(async()=>{await api('/api/resolve-conflict',{id:Number($('conflict-id').value),choice:$('conflict-choice').value,reason:$('conflict-reason').value});toast('冲突处理已记录');await refresh();table('conflicts',[['冲突编号','id'],['期号','draw_id'],['新记录','new_record']],await api('/api/conflicts'));});
 

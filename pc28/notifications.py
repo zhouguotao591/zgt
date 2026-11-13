@@ -1,6 +1,7 @@
 """Durable administrator alerts with subscriptions by event type."""
 from datetime import datetime, timedelta, timezone
 import json
+import hashlib
 import re
 import time
 import urllib.request
@@ -9,7 +10,9 @@ from zoneinfo import ZoneInfo
 from .bot_secret import SecretStore
 from .model import utcnow
 
-EVENTS = ('order', 'strategy', 'ratio', 'daily_ratio', 'daily_profit')
+EVENTS = ('order', 'strategy', 'ratio', 'market', 'daily_ratio', 'daily_profit')
+HOURLY_GAP_PERCENT = 20
+MARKET_WINDOWS = ((20,12),(30,14))
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notice_subscriptions(
  id INTEGER PRIMARY KEY,name TEXT NOT NULL,chat_id TEXT NOT NULL,
@@ -21,6 +24,7 @@ CREATE TABLE IF NOT EXISTS notice_queue(
  status TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,
  due INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS notice_due ON notice_queue(status,due,id);
+CREATE TABLE IF NOT EXISTS notice_market_state(id INTEGER PRIMARY KEY CHECK(id=1),fingerprint TEXT NOT NULL,active TEXT NOT NULL);
 """
 
 
@@ -49,12 +53,46 @@ def hourly_ratios(c, start, end):
     lines=[]
     for a,b,count in [('大','小',row['big']),('单','双',row['odd'])]:
         gap=abs(2*count-n)
-        if gap*100>4*n:
+        if gap*100>HOURLY_GAP_PERCENT*n:
             direction,amount=(a,count) if count*2>n else (b,n-count)
-            lines.append(f'{a}{b}达标方向：{direction} · 占比 {amount/n:.2%}（{amount}/{n}期） · 两侧占比差 {gap*100/n:.2f} 个百分点（阈值：超过4个百分点）')
+            lines.append(f'{a}{b}达标方向：{direction} · 占比 {amount/n:.2%}（{amount}/{n}期） · 两侧占比差 {gap*100/n:.2f} 个百分点（阈值：超过{HOURLY_GAP_PERCENT}个百分点）')
     if lines:
         start=start.astimezone(ZoneInfo('Asia/Shanghai'));end=end.astimezone(ZoneInfo('Asia/Shanghai'))
         enqueue(c,'ratio',start.isoformat(),f'每小时开奖占比 · 北京时间 {start:%Y-%m-%d %H:%M}–{end:%H:%M}\n总开奖期数：{n} 期\n大：{row["big"]} 期（{row["big"]/n:.2%}） · 小：{n-row["big"]} 期（{(n-row["big"])/n:.2%}）\n单：{row["odd"]} 期（{row["odd"]/n:.2%}） · 双：{n-row["odd"]} 期（{(n-row["odd"])/n:.2%}）\n'+'\n'.join(lines))
+
+
+def special_market(c, now, max_age_seconds=600):
+    """Alert on entry into an extreme draw-count imbalance, never backfill gaps."""
+    if not c.execute("SELECT 1 FROM notice_subscriptions s WHERE enabled=1 AND EXISTS(SELECT 1 FROM json_each(s.events) WHERE value='market') LIMIT 1").fetchone():return
+    rows=list(reversed(c.execute('SELECT id,draw_utc,size,parity,verification FROM draws ORDER BY id DESC LIMIT 30').fetchall()))
+    if not rows:return
+    conflicts={r[0] for r in c.execute('SELECT draw_id FROM conflicts WHERE resolved=0 AND draw_id>=?',(rows[0]['id'],))}
+    fingerprint=hashlib.sha256(json.dumps([[tuple(r) for r in rows],sorted(conflicts)],ensure_ascii=False).encode()).hexdigest()
+    previous=c.execute('SELECT * FROM notice_market_state WHERE id=1').fetchone()
+    if previous and previous['fingerprint']==fingerprint:return
+    active=json.loads(previous['active']) if previous else {};current={};triggered=[]
+    def known(r):
+        try:at=datetime.fromisoformat(r['draw_utc'])
+        except (ValueError,TypeError):return False
+        return at.tzinfo is not None and at<=now and r['verification'] in ('full_keno','crosschecked_abc') and r['id'] not in conflicts and r['size'] in ('大','小') and r['parity'] in ('单','双')
+    fresh=known(rows[-1]) and 0<=(now-datetime.fromisoformat(rows[-1]['draw_utc'])).total_seconds()<=max_age_seconds
+    if not fresh:return
+    for window,threshold in MARKET_WINDOWS:
+        sample=rows[-window:]
+        valid=len(sample)==window and all(known(r) for r in sample) and all(b['id']==a['id']+1 for a,b in zip(sample,sample[1:]))
+        counts={side:sum(r[field]==side for r in sample) for field,sides in [('size',('大','小')),('parity',('单','双'))] for side in sides}
+        new=[]
+        for axis,a,b in [('size','大','小'),('parity','单','双')]:
+            key=f'{window}:{axis}';gap=abs(counts[a]-counts[b]);current[key]=valid and gap>threshold
+            if current[key] and not active.get(key):new.append(f'{a}{b}次数差：{gap} 期（超过{threshold}）；较多：{a if counts[a]>counts[b] else b}')
+        if new:
+            details=[f'最近{window}期 · 第{sample[0]["id"]}–{sample[-1]["id"]}期']
+            details.extend(f'{a}：{counts[a]} 期（{counts[a]/window:.2%}） · {b}：{counts[b]} 期（{counts[b]/window:.2%}）' for a,b in [('大','小'),('单','双')])
+            triggered.append('\n'.join(details+new))
+    if triggered:
+        latest=rows[-1];at=datetime.fromisoformat(latest['draw_utc']).astimezone(ZoneInfo('Asia/Shanghai'))
+        enqueue(c,'market',str(latest['id']),f'特殊行情提醒 · 第{latest["id"]}期\n开奖时间：{at:%Y-%m-%d %H:%M:%S}（北京时间）\n\n'+'\n\n'.join(triggered)+'\n\n同一条件持续满足不重复提醒，回落后再次达标重新提醒。')
+    c.execute('INSERT INTO notice_market_state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint,active=excluded.active',(fingerprint,json.dumps(current)))
 
 
 def daily_reports(c, start, end):
@@ -315,6 +353,7 @@ class Notifications:
                 current=now.astimezone(ZoneInfo('Asia/Shanghai')).replace(minute=0,second=0,microsecond=0)
                 with self.service.db.tx() as c:
                     expire(c)
+                    special_market(c,now,self.service.cfg['collector']['max_age_seconds'])
                     if day!=current.date():
                         schedule_daily(c,now)
                     if hour!=current and (now.minute!=0 or now.second>=30):

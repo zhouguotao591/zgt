@@ -170,7 +170,7 @@ window.pc28RobotReady=true;
  async function act(button,fn){button.disabled=true;try{await fn();}catch(e){feedback(e.message);}finally{button.disabled=false;}}
  const noticeForm=document.getElementById('robot-notice-form');
  const notice=id=>document.getElementById('robot-notice-'+id);
- const noticeLabels={order:'下单异常',strategy:'策略异常',ratio:'每小时开奖占比',daily_ratio:'每日开奖占比',daily_profit:'全体会员订单日报'};
+ const noticeLabels={order:'下单异常',strategy:'策略异常',ratio:'每小时占比差超过20个百分点',market:'特殊行情（20期差>12 / 30期差>14）',daily_ratio:'每日开奖占比',daily_profit:'全体会员订单日报'};
  let noticeId=null;
  function noticeMode(){
   const fixed=notice('mode').value==='fixed';

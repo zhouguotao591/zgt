@@ -34,10 +34,12 @@ class DetailedNoticeTests(unittest.TestCase):
    self.subscribe(c)
    c.executemany("INSERT INTO draws(id,source_time,draw_utc,numbers,size,parity,first_seen,source,raw_hash,verification) VALUES(?,'t',?,'[]',?,?,'t','test','test','full_keno')",[(i+1,(start+timedelta(seconds=i)).isoformat(),'大' if i<26 else '小','单' if i<25 else '双') for i in range(50)])
    hourly_ratios(c,start,end);self.assertEqual(c.execute('SELECT COUNT(*) FROM notice_queue').fetchone()[0],0)
-   c.execute("UPDATE draws SET size='大' WHERE id=27")
+   c.execute("UPDATE draws SET size='大' WHERE id<=30")
+   hourly_ratios(c,start,end);self.assertEqual(c.execute('SELECT COUNT(*) FROM notice_queue').fetchone()[0],0)
+   c.execute("UPDATE draws SET size='大' WHERE id=31")
    hourly_ratios(c,start,end);hourly_ratios(c,start,end)
    messages=[r[0] for r in c.execute('SELECT message FROM notice_queue')]
-   self.assertEqual(len(messages),2);self.assertIn('09:00–10:00',messages[0]);self.assertIn('大小达标方向：大',messages[0]);self.assertIn('8.00 个百分点',messages[0]);self.assertIn('总开奖期数：50 期',messages[0]);self.assertIn('大：27 期（54.00%）',messages[0]);self.assertIn('小：23 期（46.00%）',messages[0]);self.assertIn('单：25 期（50.00%）',messages[0]);self.assertIn('双：25 期（50.00%）',messages[0]);self.assertNotIn('单双达标',messages[0]);self.assertNotIn('达标方向：小',messages[0])
+   self.assertEqual(len(messages),2);self.assertIn('09:00–10:00',messages[0]);self.assertIn('大小达标方向：大',messages[0]);self.assertIn('24.00 个百分点',messages[0]);self.assertIn('总开奖期数：50 期',messages[0]);self.assertIn('大：31 期（62.00%）',messages[0]);self.assertIn('小：19 期（38.00%）',messages[0]);self.assertIn('单：25 期（50.00%）',messages[0]);self.assertIn('双：25 期（50.00%）',messages[0]);self.assertNotIn('单双达标',messages[0]);self.assertNotIn('达标方向：小',messages[0])
  def test_strategy_details_include_losses_and_drawdown_with_thresholds(self):
   settings=defaults(self.s.cfg,'previous');settings.update(daily_loss_limit=500,max_drawdown=800)
   key=save(self.s,{'name':'风险策略甲','settings':settings})['id'];now=datetime(2026,11,10,12,tzinfo=timezone.utc)

@@ -59,7 +59,15 @@ body[data-admin="1"] #strategies.active{flex:1;min-height:0}
 body[data-admin="1"] #strategies>.panel{height:100%;min-height:0;margin-bottom:0;display:flex;flex-direction:column}
 body[data-admin="1"] #strategies>.panel>.panel-head,body[data-admin="1"] #strategies>.panel>p{flex-shrink:0}
 body[data-admin="1"] #strategy-catalog{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid #e3e9f1;border-radius:8px}
-body[data-admin="1"] #strategy-catalog table{border-collapse:separate;border-spacing:0}
+body[data-admin="1"] #strategy-catalog table{border-collapse:separate;border-spacing:0;min-width:2450px;height:auto}
+/* Give every statistics column space; unassigned fixed-layout columns can collapse
+   to a few pixels and turn ordinary text into an excessively tall table row. */
+body[data-admin="1"] #strategy-catalog th{width:130px}
+body[data-admin="1"] #strategy-catalog th:first-child{width:220px}
+body[data-admin="1"] #strategy-catalog th:nth-child(8){width:180px}
+body[data-admin="1"] #strategy-catalog th:last-child{width:360px}
+body[data-admin="1"] #strategy-catalog tbody tr,body[data-admin="1"] #strategy-catalog td{height:auto}
+body[data-admin="1"] #strategy-catalog td{padding:10px 12px;line-height:1.5}
 body[data-admin="1"] #strategy-catalog thead th{position:sticky;top:0;z-index:3;background:#f6f8fb;box-shadow:0 1px 0 #dce5ef}
 body[data-admin="1"] #strategy-catalog th:first-child,body[data-admin="1"] #strategy-catalog td:first-child{position:sticky;left:0;background:#fff;z-index:2;box-shadow:3px 0 6px #17324d0d}
 body[data-admin="1"] #strategy-catalog th:last-child,body[data-admin="1"] #strategy-catalog td:last-child{position:sticky;right:0;background:#fff;z-index:2;box-shadow:-3px 0 6px #17324d0d}
