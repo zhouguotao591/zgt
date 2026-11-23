@@ -8,11 +8,13 @@ from .robot_platforms import Platforms
 from .robot_accounts import Accounts
 from . import robot_risk
 from . import order_confirmation
+from .money_plans import AwaitingSettlement,quote
 from .timing import regular_schedule
 ENDPOINT='http://127.0.0.1:17890/api/v1/signals'
 TABLES={'legacy':'orders','trend':'trend_orders','custom':'custom_orders','signal':'strategy_signals'}
 CONFIG={'enabled':False,'timeout_seconds':5,'max_attempts':3,'max_age_seconds':180,'send_interval_seconds':1,'account_id':0,'bot_key':0,'merge_wait_seconds':3,'delay_min_seconds':30,'delay_max_seconds':60}
 DRAW_SEND_BUFFER_SECONDS=10
+SETTLEMENT_RETRY_MIN_SECONDS=60
 
 class SignalExpired(Exception):
  pass
@@ -54,6 +56,7 @@ CREATE INDEX IF NOT EXISTS robot_outbox_due ON robot_outbox(status,next_attempt,
 CREATE TABLE IF NOT EXISTS robot_batches(id TEXT PRIMARY KEY,request TEXT NOT NULL,created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS robot_batch_items(outbox_id INTEGER PRIMARY KEY,batch_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS robot_bindings(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,account_id INTEGER NOT NULL,bot_key INTEGER NOT NULL,signal_type TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 0,strategy_ids TEXT NOT NULL,starts TEXT NOT NULL,created TEXT NOT NULL,updated TEXT NOT NULL,deleted INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS robot_settlement_retries(recipient_id INTEGER NOT NULL,target_draw INTEGER NOT NULL,order_id INTEGER NOT NULL,PRIMARY KEY(recipient_id,target_draw,order_id));
 CREATE TABLE IF NOT EXISTS robot_delivery_slots(recipient_id INTEGER NOT NULL,target_draw INTEGER NOT NULL,batch_id TEXT NOT NULL,PRIMARY KEY(recipient_id,target_draw));
 CREATE TABLE IF NOT EXISTS robot_hidden_records(outbox_id INTEGER PRIMARY KEY,deleted_at TEXT NOT NULL);
 """
@@ -129,7 +132,7 @@ class RobotSignals(Accounts,Platforms):
    if 'recipient_id' not in columns:c.execute('ALTER TABLE robot_outbox ADD COLUMN recipient_id INTEGER NOT NULL DEFAULT 0')
    if 'recipient_name' not in columns:c.execute("ALTER TABLE robot_outbox ADD COLUMN recipient_name TEXT NOT NULL DEFAULT '站点默认'")
    if 'push_cents' not in columns:c.execute('ALTER TABLE robot_outbox ADD COLUMN push_cents INTEGER')
-   for name,definition in [('scheduled_at','TEXT'),('sent_at','TEXT'),('accepted_at','TEXT'),('member_odds','TEXT'),('member_user_id','INTEGER')]:
+   for name,definition in [('scheduled_at','TEXT'),('sent_at','TEXT'),('accepted_at','TEXT'),('member_odds','TEXT'),('member_user_id','INTEGER'),('settlement_retry','INTEGER NOT NULL DEFAULT 0')]:
     if name not in columns:c.execute('ALTER TABLE robot_outbox ADD COLUMN '+name+' '+definition)
    c.execute("UPDATE robot_outbox SET accepted_at=finished WHERE status='sent' AND accepted_at IS NULL AND finished IS NOT NULL")
    c.execute('DROP INDEX IF EXISTS robot_outbox_order')
@@ -281,30 +284,51 @@ class RobotSignals(Accounts,Platforms):
   direction=json.loads(o['strategy_json'])['direction'] if engine=='legacy' else o['direction'];created=datetime.fromisoformat(o['created'])
   return {'strategy_name':name,'strategy_id':key,'engine':engine,'order_id':o['id'],'target_draw':o['target_draw'],'cutoff_draw':o['cutoff_draw'],'direction':direction,'stake':f"{o['stake']/100:.2f}".rstrip('0').rstrip('.'),'stake_cents':o['stake'],'created_at':o['created'],'beijing_time':created.astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S'),'cycle':o['round_id'] if engine=='legacy' else o['cycle'],'step':o['round_attempt'] if engine=='legacy' else o['step'],'symbol':'PC28'}
  def capture(self):
-  now=int(time.time());added=0
+  now=time.time();added=0
   with self.service.lock,self.db.tx() as c:
    cfg=json.loads(c.execute('SELECT settings FROM robot_config WHERE id=1').fetchone()[0]);rules=[{**self.defaults(),'id':0,'starts':'{}','strategy_ids':'[]','payload_template':json.dumps(DEFAULT_PAYLOAD)}]
+   if not cfg['enabled']:
+    c.execute('DELETE FROM robot_settlement_retries')
    for engine,table in TABLES.items():
     cursor=c.execute('SELECT last_id FROM robot_cursors WHERE engine=?',(engine,)).fetchone()[0]
     if not cfg['enabled'] or not rules:
      c.execute('UPDATE robot_cursors SET last_id=? WHERE engine=?',(c.execute('SELECT COALESCE(MAX(id),0) FROM '+table).fetchone()[0],engine));continue
-    orders=[dict(r) for r in c.execute('SELECT * FROM '+table+' WHERE id>? ORDER BY id LIMIT 500',(cursor,))]
-    for o in orders:
-     c.execute('UPDATE robot_cursors SET last_id=? WHERE engine=?',(o['id'],engine))
+    orders=[(dict(r),None) for r in c.execute('SELECT * FROM '+table+' WHERE id>? ORDER BY id LIMIT 500',(cursor,))]
+    if engine=='signal':
+     retries=c.execute('SELECT s.*,r.recipient_id retry_recipient FROM robot_settlement_retries r JOIN strategy_signals s ON s.id=r.order_id ORDER BY s.id')
+     orders.extend((dict(r),r['retry_recipient']) for r in retries)
+    for o,retry_recipient in orders:
+     if retry_recipient is None:
+      c.execute('UPDATE robot_cursors SET last_id=? WHERE engine=?',(o['id'],engine))
+     else:
+      c.execute('DELETE FROM robot_settlement_retries WHERE recipient_id=? AND target_draw=? AND order_id=?',(retry_recipient,o['target_draw'],o['id']))
      if o['status']=='awaiting_result':continue
      if engine=='custom' and c.execute("SELECT 1 FROM gap_order_tags WHERE engine='custom' AND order_id=?",(o['id'],)).fetchone():continue
      try:when=int(datetime.fromisoformat(o['created']).timestamp())
      except (TypeError,ValueError):continue
      if now-when>cfg['max_age_seconds'] or when>now+30:continue
      if engine=='signal' and (o['status']!='pending' or c.execute('SELECT 1 FROM draws WHERE id=?',(o['target_draw'],)).fetchone()):continue
+     if retry_recipient is not None:
+      if c.execute('SELECT 1 FROM robot_delivery_slots WHERE recipient_id=? AND target_draw=?',(retry_recipient,o['target_draw'])).fetchone():continue
+      latest=c.execute('SELECT id,draw_utc FROM draws ORDER BY id DESC LIMIT 1').fetchone()
+      if latest and latest['id']>=o['target_draw']:continue
+      deadline=draw_deadline(c,o['target_draw'],when,cfg['max_age_seconds'],latest=latest)
+      if deadline is None:
+       c.execute('INSERT INTO robot_settlement_retries VALUES(?,?,?)',(retry_recipient,o['target_draw'],o['id']))
+       continue
+      if deadline['draw_at']-now<=SETTLEMENT_RETRY_MIN_SECONDS:
+       c.execute("UPDATE robot_capture_skips SET reason='待结算信号已到重试截止时间，距开奖不足或等于60秒' WHERE engine='signal' AND order_id=? AND bot_id=(SELECT bot_id FROM robot_binding_map WHERE binding_id=?)",(o['id'],retry_recipient))
+       continue
+      if deadline['expires_at']<=now:continue
      context=self.context(c,engine,o)
-     self.capture_gates(c,context,o)
+     if retry_recipient is None:self.capture_gates(c,context,o)
      if not self.active_strategy(c,context['strategy_id']):continue
      for rule in rules:
       if o['id']<=json.loads(rule['starts']).get(engine,0):continue
       if not rule['all_strategies'] and context['strategy_id'] not in json.loads(rule['strategy_ids']):continue
       active={**rule,'payload_template':json.loads(rule['payload_template'])}
       for recipient in self.recipients(c,context,o):
+       if retry_recipient is not None and recipient['id']!=retry_recipient:continue
        own_context=context
        mapping=None
        if recipient['id']:
@@ -319,10 +343,12 @@ class RobotSignals(Accounts,Platforms):
         subscription=c.execute('SELECT * FROM robot_subscriptions WHERE bot_id=? AND strategy_id=? AND enabled=1',(mapping['bot_id'],context['strategy_id'])).fetchone() if mapping else None
         if not subscription:continue
         try:
-         from .money_plans import quote
          cents,snapshot=quote(c,subscription)
         except ValueError as error:
-         c.execute('INSERT OR IGNORE INTO robot_capture_skips VALUES(?,?,?,?,?,?,?,?)',(engine,o['id'],mapping['account_id'],mapping['bot_id'],context['strategy_id'],o['target_draw'],str(error),utcnow()));continue
+         c.execute('INSERT OR IGNORE INTO robot_capture_skips VALUES(?,?,?,?,?,?,?,?)',(engine,o['id'],mapping['account_id'],mapping['bot_id'],context['strategy_id'],o['target_draw'],str(error),utcnow()))
+         if isinstance(error,AwaitingSettlement):
+          c.execute('INSERT OR IGNORE INTO robot_settlement_retries SELECT ?,?,? WHERE NOT EXISTS (SELECT 1 FROM robot_delivery_slots WHERE recipient_id=? AND target_draw=?)',(recipient['id'],o['target_draw'],o['id'],recipient['id'],o['target_draw']))
+         continue
        else:cents=member_stake(json.loads(recipient['strategy_amounts']).get(context['strategy_id']),recipient['default_cents'],o['stake'])
        own_context={**context,'stake_cents':cents,'stake':f'{cents/100:.2f}'.rstrip('0').rstrip('.')}
        event=f"pc28-{self.installation}-{rule['id']}-{recipient['id']}-{engine}-{o['id']}-{o['target_draw']}";wire,message=self.build_request(active,own_context,event)
@@ -331,7 +357,10 @@ class RobotSignals(Accounts,Platforms):
        cur=c.execute("INSERT OR IGNORE INTO robot_outbox(event_id,rule_id,name,engine,order_id,strategy_id,strategy_name,target_draw,event_time,created,request,message,status,recipient_id,recipient_name,push_cents,last_error,platform_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(event,rule['id'],rule['name'],engine,o['id'],context['strategy_id'],context['strategy_name'],o['target_draw'],when,utcnow(),json.dumps(wire,ensure_ascii=False),message,'pending' if valid else 'failed',recipient['id'],recipient['username'],own_context['stake_cents'],'' if valid else '按比例计算的下单金额超出1—20000U，未发送',recipient['platform_id']));added+=cur.rowcount
        if cur.rowcount:
         oid=cur.lastrowid
-        if subscription:c.execute('UPDATE robot_outbox SET subscription_id=?,money_plan_snapshot=? WHERE id=?',(subscription['id'],snapshot,oid))
+        if subscription:
+         c.execute('UPDATE robot_outbox SET subscription_id=?,money_plan_snapshot=?,settlement_retry=? WHERE id=?',(subscription['id'],snapshot,int(retry_recipient is not None),oid))
+         if retry_recipient is not None:
+          c.execute('DELETE FROM robot_capture_skips WHERE engine=? AND order_id=? AND account_id=? AND bot_id=? AND strategy_id=?',(engine,o['id'],mapping['account_id'],mapping['bot_id'],context['strategy_id']))
         c.execute('UPDATE robot_outbox SET member_odds=?,member_user_id=?,simulation_cents=? WHERE id=?',(o['odds_json'] if engine=='signal' else json.dumps(self.service.cfg['odds']),recipient['user_id'],o['stake'],oid))
         if mapping:
          c.execute('UPDATE robot_outbox SET follow_account_id=?,bot_id=?,config_version=(SELECT version FROM robot_accounts WHERE id=?) WHERE id=?',(mapping['account_id'],mapping['bot_id'],mapping['account_id'],oid))
@@ -354,7 +383,7 @@ class RobotSignals(Accounts,Platforms):
   with self.db.tx() as c:
    c.execute("UPDATE robot_outbox SET status='expired',last_error='已超过信号有效期，未发送',finished=? WHERE status IN ('pending','retry') AND event_time<?",(utcnow(),now-cfg['max_age_seconds']))
    c.execute("UPDATE robot_outbox SET status='retry',next_attempt=? WHERE status='sending' AND COALESCE(lease_until,0)<=?",(now,now))
-   candidate=c.execute("SELECT o.* FROM robot_outbox o WHERE status IN ('pending','retry') AND next_attempt<=? AND (is_test=1 OR ?=1) AND (? IS NULL OR platform_id=?) AND NOT EXISTS(SELECT 1 FROM robot_outbox busy WHERE busy.status='sending' AND busy.platform_id=o.platform_id AND busy.recipient_id=o.recipient_id) ORDER BY id LIMIT 1",(now,int(cfg['enabled']),platform_id,platform_id)).fetchone()
+   candidate=c.execute("SELECT o.* FROM robot_outbox o WHERE status IN ('pending','retry') AND next_attempt<=? AND (is_test=1 OR ?=1) AND (? IS NULL OR platform_id=?) AND NOT EXISTS(SELECT 1 FROM robot_settlement_retries w WHERE w.recipient_id=o.recipient_id AND w.target_draw=o.target_draw AND o.status='pending' AND NOT EXISTS(SELECT 1 FROM robot_batch_items i WHERE i.outbox_id=o.id)) AND NOT EXISTS(SELECT 1 FROM robot_outbox busy WHERE busy.status='sending' AND busy.platform_id=o.platform_id AND busy.recipient_id=o.recipient_id) ORDER BY id LIMIT 1",(now,int(cfg['enabled']),platform_id,platform_id)).fetchone()
    if not candidate:return False
    row=dict(candidate)
    # Freeze the destination while selecting the batch; a concurrent platform
@@ -403,7 +432,11 @@ class RobotSignals(Accounts,Platforms):
      choices=[n for n in range(cfg['delay_min_seconds'],cfg['delay_max_seconds']+1) if not previous or n!=int(previous[0])]
      chosen=choices[secrets.randbelow(len(choices))]
      c.execute("INSERT OR REPLACE INTO runtime_state(key,value,updated) VALUES('robot_last_delay',?,?)",(str(chosen),utcnow()))
-     due=latest_created+chosen;scheduled=datetime.fromtimestamp(due,timezone.utc).isoformat()
+     due=latest_created+chosen
+     if any(r['settlement_retry'] for r in members):
+      retry_deadline=draw_deadline(c,row['target_draw'],min(r['event_time'] for r in members),cfg['max_age_seconds'],wire.get('expires_at'),latest_draw)
+      if retry_deadline:due=min(due,retry_deadline['expires_at']-1)
+     scheduled=datetime.fromtimestamp(due,timezone.utc).isoformat()
      c.execute('UPDATE robot_outbox SET scheduled_at=?,next_attempt=MAX(next_attempt,?) WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)',(scheduled,int(math.ceil(due)),batch_id))
     if datetime.fromisoformat(scheduled).timestamp()>time.time():return False
     event_time=min(r['event_time'] for r in members)

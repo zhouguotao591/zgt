@@ -168,6 +168,51 @@ class MoneyPlanTests(unittest.TestCase):
   s.db.import_records([{'id':1000+i,'time':(now-timedelta(seconds=(40-i)*210)).isoformat(),'numbers':list(range(1,21))} for i in range(41)],'test',received=now.isoformat())
   engine=Signals(s);engine.tick(now+timedelta(seconds=1));rows=s.db.query("SELECT * FROM strategy_signals WHERE strategy='legacy'")
   self.assertEqual(len(rows),1);self.assertEqual(rows[0]['direction'],'小');self.assertEqual(rows[0]['stake'],10000)
+ def check_settlement_retry(self,remaining):
+  from pc28.robot_signals import RobotSignals
+  aid=self.create();pid=self.plan(mode='adjust',base_cents=3000,loss_increment_cents=100)
+  a=self.r.account_detail(aid);bot=a['bots'][0]
+  self.r.account_action('subscriptions',{'id':aid,'version':a['version'],'bot_id':bot['id'],'subscriptions':[{'strategy_id':key,'amount_mode':'plan','money_plan_id':pid} for key in ('size','parity')]},None,'')
+  self.s.cfg['collector']['maintenance_guard_enabled']=False
+  self.signal(998);self.assertEqual(self.r.capture(),1)
+  old=self.s.db.query('SELECT * FROM robot_outbox')[0]
+  uid=self.r.account_detail(aid)['user_id']
+  now=datetime.now(timezone.utc).replace(microsecond=0)
+  draw_time=now+timedelta(seconds=remaining)
+  self.s.db.import_records([{'id':998,'time':(now-timedelta(seconds=210-remaining)).isoformat(),'numbers':list(range(1,21))}],'test')
+  with self.s.db.tx() as c:
+   c.execute("INSERT OR REPLACE INTO runtime_state VALUES('draw_timer',?,?)",(json.dumps({'next_draw_id':999,'next_draw_at':draw_time.isoformat()}),now.isoformat()))
+   c.execute("INSERT INTO member_orders(user_id,outbox_id,target_draw,direction,stake,placed_at,accepted_at,odds_json) VALUES(?,?,998,'大',3000,'t','t','{}')",(uid,old['id']))
+  first=self.signal(999)
+  with self.s.db.tx() as c:
+   c.execute("INSERT INTO strategy_signals(strategy,version,target_draw,cutoff_draw,created,direction,cycle,step,odds_json,evidence,source_engine,source_id) SELECT 'parity',version,target_draw,cutoff_draw,created,'单',cycle,step,odds_json,evidence,'retry-test',source_id FROM strategy_signals WHERE id=?",(first,))
+   c.execute("UPDATE robot_outbox SET status='sent' WHERE id=?",(old['id'],))
+  self.assertEqual(self.r.capture(),1)
+  self.assertFalse(self.r.deliver_one())
+  self.assertEqual(self.s.db.query('SELECT * FROM robot_delivery_slots'),[])
+  self.assertEqual(len(self.s.db.query('SELECT * FROM robot_settlement_retries')),1)
+  with self.s.db.tx() as c:
+   c.execute("UPDATE member_orders SET status='settled',pnl=-3000,outcome='loss' WHERE outbox_id=?",(old['id'],))
+  restarted=RobotSignals(self.s,self.r.secret)
+  with patch('pc28.robot_signals.time.time',return_value=now.timestamp()):
+   self.assertEqual(restarted.capture(),int(remaining>60))
+   self.assertEqual(restarted.capture(),0)
+  self.assertEqual(self.s.db.query('SELECT * FROM robot_settlement_retries'),[])
+  expected=[{'push_cents':3100,'settlement_retry':1}] if remaining>60 else []
+  self.assertEqual(self.s.db.query("SELECT push_cents,settlement_retry FROM robot_outbox WHERE target_draw=999 AND strategy_id='size'"),expected)
+  if remaining>60:
+   with patch('pc28.robot_signals.time.time',return_value=now.timestamp()),patch('pc28.robot_signals.secrets.randbelow',side_effect=lambda n:n-1):
+    self.assertFalse(restarted.deliver_one())
+   self.assertEqual(len(self.s.db.query('SELECT * FROM robot_batch_items')),2)
+   scheduled=self.s.db.query('SELECT scheduled_at FROM robot_outbox WHERE target_draw=999')[0]['scheduled_at']
+   self.assertLess(datetime.fromisoformat(scheduled),draw_time-timedelta(seconds=10))
+
+ def test_retry_after_settlement_with_more_than_one_minute(self):
+  self.check_settlement_retry(61)
+
+ def test_no_settlement_retry_with_exactly_one_minute(self):
+  self.check_settlement_retry(60)
+
  def test_old_unconfirmed_failure_blocks_new_amount(self):
   aid=self.create();pid=self.plan();sub=self.subscribe(aid,pid);self.signal();self.r.capture();out=self.s.db.query('SELECT * FROM robot_outbox')[0]
   with self.s.db.tx() as c:

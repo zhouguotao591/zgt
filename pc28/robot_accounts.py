@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS robot_bots(id INTEGER PRIMARY KEY,account_id INTEGER 
 CREATE TABLE IF NOT EXISTS robot_subscriptions(id INTEGER PRIMARY KEY,account_id INTEGER NOT NULL,strategy_id TEXT NOT NULL,bot_id INTEGER NOT NULL,amount_mode TEXT NOT NULL,fixed_cents INTEGER NOT NULL DEFAULT 10000,ratio_units INTEGER NOT NULL DEFAULT 10000,enabled INTEGER NOT NULL DEFAULT 1,version INTEGER NOT NULL DEFAULT 1,starts TEXT NOT NULL,legacy_fraction INTEGER NOT NULL DEFAULT 0,UNIQUE(account_id,bot_id,strategy_id));
 CREATE TABLE IF NOT EXISTS robot_binding_map(binding_id INTEGER PRIMARY KEY,account_id INTEGER NOT NULL,bot_id INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS robot_account_order_slots(engine TEXT NOT NULL,order_id INTEGER NOT NULL,account_id INTEGER NOT NULL,outbox_id INTEGER NOT NULL,PRIMARY KEY(engine,order_id,account_id));
-CREATE TABLE IF NOT EXISTS robot_capture_skips(engine TEXT,order_id INTEGER,account_id INTEGER,bot_id INTEGER,strategy_id TEXT,target_draw INTEGER,reason TEXT,created TEXT,PRIMARY KEY(engine,order_id,account_id,strategy_id));
+CREATE TABLE IF NOT EXISTS robot_capture_skips(engine TEXT,order_id INTEGER,account_id INTEGER,bot_id INTEGER,strategy_id TEXT,target_draw INTEGER,reason TEXT,created TEXT,PRIMARY KEY(engine,order_id,account_id,bot_id,strategy_id));
 CREATE TABLE IF NOT EXISTS robot_account_migrations(name TEXT PRIMARY KEY,created TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS robot_conflict_binding ON robot_binding_map(binding_id);
 CREATE TABLE IF NOT EXISTS robot_account_conflicts(id INTEGER PRIMARY KEY,platform_id INTEGER,external_account_id INTEGER,binding_id INTEGER UNIQUE,reason TEXT NOT NULL,created TEXT NOT NULL);
@@ -34,6 +34,13 @@ class Accounts:
   with self.service.lock,self.db.tx() as c:
    for sql in (SCHEMA+robot_risk.SCHEMA).split(';'):
     if sql.strip():c.execute(sql)
+   skip_schema=c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='robot_capture_skips'").fetchone()[0]
+   if 'PRIMARY KEY(engine,order_id,account_id,strategy_id)' in skip_schema:
+    c.execute('ALTER TABLE robot_capture_skips RENAME TO robot_capture_skips_v1')
+    c.execute(next(sql for sql in SCHEMA.split(';') if 'CREATE TABLE IF NOT EXISTS robot_capture_skips(' in sql))
+    c.execute('INSERT INTO robot_capture_skips SELECT * FROM robot_capture_skips_v1')
+    c.execute('DROP TABLE robot_capture_skips_v1')
+   c.execute('CREATE INDEX IF NOT EXISTS robot_capture_skips_account ON robot_capture_skips(account_id,created DESC)')
    robot_risk.migrate(c)
    subscription_schema=c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='robot_subscriptions'").fetchone()[0]
    if 'UNIQUE(account_id,strategy_id)' in subscription_schema:

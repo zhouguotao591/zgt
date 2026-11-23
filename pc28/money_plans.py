@@ -98,13 +98,17 @@ def advance(state,s,order):
  state['next_cents']=max(floor,min(s['max_cents'],((next_stake+99)//100)*100))
  return state
 
+class AwaitingSettlement(ValueError):
+ pass
+
+
 def quote(c,subscription):
  plan=available(c,subscription['money_plan_id']);sid=subscription['id'];raw=c.execute('SELECT * FROM money_plan_states WHERE subscription_id=?',(sid,)).fetchone()
  # A confirmed gap keeps its exposure but can be bypassed for sizing.
  unresolved=c.execute("""SELECT 1 FROM robot_outbox b LEFT JOIN member_orders o ON o.outbox_id=b.id
  LEFT JOIN robot_execution e ON e.outbox_id=b.id WHERE b.subscription_id=? AND b.is_test=0 AND
  (o.status='pending' OR o.id IS NULL AND (e.status IN ('unconfirmed','submitted','awaiting','executed') OR b.status IN ('pending','retry','sending','sent') AND COALESCE(e.status,'') NOT IN ('rejected','failed','timeout','expired','cancelled'))) LIMIT 1""",(sid,)).fetchone()
- if unresolved:raise ValueError('上一笔执行或结算尚未确认，金额进度等待核对')
+ if unresolved:raise AwaitingSettlement('上一笔执行或结算尚未确认，金额进度等待核对')
  s=json.loads(plan['settings'])
  if not raw or raw['plan_id']!=plan['id'] or raw['version']!=plan['version']:
   last=c.execute('SELECT COALESCE(MAX(o.id),0) FROM member_orders o JOIN robot_outbox b ON b.id=o.outbox_id WHERE b.subscription_id=?',(sid,)).fetchone()[0];state={'next_cents':s['base_cents'],'increases':0,'decreases':0}
