@@ -22,6 +22,30 @@ class MoneyPlanTests(unittest.TestCase):
   return self.s.db.query('SELECT * FROM robot_subscriptions WHERE bot_id=? AND strategy_id=?',(bot['id'],'size'))[0]
  def signal(self,target=999):
   with self.s.db.tx() as c:return c.execute("INSERT INTO strategy_signals(strategy,version,target_draw,cutoff_draw,created,direction,cycle,step,odds_json,evidence,source_engine,source_id) VALUES('size','v1',?,?,?,'大',1,1,?,'{}','trend',?)",(target,target-1,datetime.now(timezone.utc).isoformat(),json.dumps(self.s.cfg['odds']),target)).lastrowid
+ def test_combo_direction_reaches_receiver_payload_and_member_settlement(self):
+  from pc28.member_orders import import_signal,settle
+  from pc28.strategies import control
+  s=self.s;s.cfg['collector']['maintenance_guard_enabled']=False
+  settings=defaults(s.cfg,'single');settings.update(direction='大单',axis='combo')
+  key=custom_strategy.save(s,{'name':'组合单边','settings':settings})['id']
+  control(s,{'id':key,'enabled':True})
+  aid=self.create();pid=self.plan(base_cents=3000);a=self.r.account_detail(aid)
+  self.r.account_action('subscriptions',{'id':aid,'version':a['version'],'bot_id':a['bots'][0]['id'],'subscriptions':[{'strategy_id':key,'amount_mode':'plan','money_plan_id':pid}]},None,'')
+  now=datetime.now(timezone.utc).replace(microsecond=0)
+  s.db.import_records([{'id':998,'time':(now-timedelta(seconds=10)).isoformat(),'numbers':list(range(1,21))}],'test',received=now.isoformat())
+  s.signals.tick(now)
+  self.assertEqual(self.r.capture(),1)
+  out=s.db.query('SELECT * FROM robot_outbox')[0]
+  self.assertEqual((out['message'],json.loads(out['request'])['payload']['text']),('大单30','大单30'))
+  placed=out['created'];draw_at=(now+timedelta(seconds=200)).isoformat()
+  s.db.import_records([{'id':999,'time':draw_at,'numbers':list(range(1,21))}],'test',received=draw_at)
+  s.signals.settle(now+timedelta(seconds=201))
+  with s.db.tx() as c:
+   import_signal(c,s,out,None,placed,placed)
+   settle(c,until=draw_at)
+  member=s.db.query('SELECT direction,status,pnl FROM member_orders')[0]
+  self.assertEqual(member,{'direction':'大单','status':'settled','pnl':9945})
+  self.assertEqual(s.db.query('SELECT status,pnl FROM strategy_signals WHERE strategy=?',(key,))[0],{'status':'settled','pnl':33150})
  def test_independent_plan_capture_and_legacy_no_duplicate(self):
   aid=self.create();pid=self.plan(base_cents=3000);self.subscribe(aid,pid)
   self.order();self.signal();self.assertEqual(self.r.capture(),1)
@@ -46,6 +70,23 @@ class MoneyPlanTests(unittest.TestCase):
   self.assertEqual(mp.advance({'next_cents':100},s,{'stake':100,'outcome':'win'})['next_cents'],100)
   with self.assertRaises(ValueError):mp.validate({'base_cents':1})
   with self.assertRaises(ValueError):mp.validate({'mode':'bad'})
+ def test_net_amount_reset_includes_boundary_order_and_offsets_results(self):
+  s=mp.validate({**mp.DEFAULTS,'mode':'adjust','reset_basis':'amount','base_cents':1000,
+                 'loss_increment_cents':100,'win_decrement_cents':100,'max_increase_steps':9,'max_decrease_steps':9})
+  for outcome,boundary in [('loss',1900),('win',100)]:
+   state={'next_cents':1000,'increases':8,'decreases':5}
+   for _ in range(9):state=mp.advance(state,s,{'stake':state['next_cents'],'outcome':outcome})
+   self.assertEqual(state['next_cents'],boundary)
+   refund=mp.advance(state,s,{'stake':boundary,'outcome':'refund'})
+   self.assertEqual(refund,state)
+   state=mp.advance(state,s,{'stake':boundary,'outcome':outcome})
+   self.assertEqual(state,{'next_cents':1000,'increases':0,'decreases':0})
+  state={'next_cents':1000}
+  for _ in range(20):
+   state=mp.advance(state,s,{'stake':state['next_cents'],'outcome':'loss'})
+   state=mp.advance(state,s,{'stake':state['next_cents'],'outcome':'win'})
+  self.assertEqual(state['next_cents'],1000)
+  self.assertEqual((state['increases'],state['decreases']),(0,0))
  def test_delete_in_use_and_disabled_plan_block(self):
   aid=self.create();pid=self.plan();sub=self.subscribe(aid,pid);row=mp.listing(self.s)['rows'][0]
   with self.assertRaisesRegex(ValueError,'有效订阅'):mp.save(self.s,{'id':pid,'version':row['version'],'action':'archive'},None,'')
@@ -65,6 +106,52 @@ class MoneyPlanTests(unittest.TestCase):
   nxt=now+timedelta(seconds=210);s.db.import_records([{'id':1061,'time':nxt.isoformat(),'numbers':list(range(1,21))}],'test',received=nxt.isoformat())
   engine.tick(nxt+timedelta(seconds=1));self.assertEqual(stats(s.db)[key]['bets'],1);self.assertEqual(stats(s.db)[key]['pending'],1)
   self.assertEqual(s.db.query('SELECT COUNT(*) n FROM strategy_signals WHERE strategy=?',(key,))[0]['n'],2)
+ def test_missing_draw_keeps_subscription_running_and_settles_once(self):
+  from pc28.member_orders import entry,settle
+  from pc28.collector import missing_order_draws
+  s=self.s;s.cfg['collector']['maintenance_guard_enabled']=False
+  aid=self.create();pid=self.plan(base_cents=3000);sub=self.subscribe(aid,pid)
+  strategy=custom_strategy.save(s,{'name':'缺期续单','settings':defaults(s.cfg,'previous')})['id']
+  now=datetime.now(timezone.utc)-timedelta(seconds=425)
+  def draw(target,at,numbers):
+   s.db.import_records([{'id':target,'time':at.isoformat(),'numbers':numbers}],'test',received=at.isoformat())
+  with s.db.tx() as c:c.execute('UPDATE custom_strategies SET enabled=1 WHERE id=?',(strategy,))
+  draw(998,now,list(range(1,21)))
+  with patch('pc28.follow_strategy.utcnow',return_value=(now+timedelta(seconds=1)).isoformat()):
+   s.signals.tick(now+timedelta(seconds=1))
+  self.signal(999);self.assertEqual(self.r.capture(),1)
+  out=s.db.query('SELECT * FROM robot_outbox')[0];uid=self.r.account_detail(aid)['user_id']
+  placed=(now+timedelta(seconds=1)).isoformat()
+  with s.db.tx() as c:
+   oid=c.execute("INSERT INTO member_orders(user_id,outbox_id,target_draw,direction,stake,placed_at,accepted_at,odds_json,bot_id) VALUES(?,?,999,'大',3000,?,?,?,?)",(uid,out['id'],placed,placed,json.dumps(s.cfg['odds']),sub['bot_id'])).lastrowid
+   entry(c,uid,'stake',-3000,order_id=oid)
+   with self.assertRaisesRegex(ValueError,'尚未确认'):mp.quote(c,sub)
+  latest=now+timedelta(seconds=420)
+  draw(1000,latest,list(range(4,24)))
+  s.signals.tick(latest+timedelta(seconds=1))
+  with s.db.tx() as c:
+   settle(c)
+   self.assertEqual(c.execute('SELECT status FROM member_orders WHERE id=?',(oid,)).fetchone()[0],'awaiting_result')
+  self.assertEqual(missing_order_draws(s.db),{999})
+  self.signal(1001);self.assertEqual(self.r.capture(),1)
+  self.assertEqual(s.db.query('SELECT push_cents FROM robot_outbox WHERE target_draw=1001')[0]['push_cents'],3000)
+  rows=s.db.query('SELECT target_draw,status,direction FROM strategy_signals WHERE strategy=? ORDER BY target_draw',(strategy,))
+  self.assertEqual([tuple(row.values()) for row in rows],[(999,'awaiting_result','大'),(1001,'pending','小')])
+  # Move the missing draw outside the runtime's 200-draw sync window.
+  for target in range(1001,1202):
+   draw(target,latest+timedelta(seconds=(target-1000)*210),list(range(1,21)))
+  after=latest+timedelta(seconds=201*210+1)
+  s.signals.tick(after)
+  draw(999,now+timedelta(seconds=210),list(range(1,21)))
+  s.signals.tick(after+timedelta(seconds=1))
+  runtime=s.signals.runtime
+  self.assertEqual(runtime.query('SELECT status FROM custom_orders WHERE strategy=? AND target_draw=999',(strategy,))[0]['status'],'settled')
+  with s.db.tx() as c:
+   settle(c);settle(c)
+   self.assertEqual(c.execute('SELECT status FROM member_orders WHERE id=?',(oid,)).fetchone()[0],'settled')
+   self.assertEqual(c.execute("SELECT COUNT(*) FROM member_cash_ledger WHERE order_id=? AND kind='settle'",(oid,)).fetchone()[0],1)
+  self.assertEqual(s.db.query('SELECT status FROM strategy_signals WHERE strategy=? AND target_draw=999',(strategy,))[0]['status'],'settled')
+  self.assertEqual(missing_order_draws(s.db),set())
  def test_trend_runtime_export_and_no_backfill(self):
   s=self.s;s.cfg['collector']['maintenance_guard_enabled']=False
   s.cfg['trend_simulation']['strategies']={a:{'direction':'大' if a=='size' else '双','lookback':20} for a in ('size','parity')}

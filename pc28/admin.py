@@ -15,15 +15,17 @@ def page_rows(db,table,columns,q,where='1',args=()):
 
 def get(service,path,q,user=None):
  db=service.db;auth=service.auth;scope=member_scope(user)
+ if path=='trend-risk':return service.trend_risk.listing(user,q)
+ if path=='trend-risk-logs':return service.trend_risk.logs(user,q)
  if path=='money-plans':
   from .money_plans import listing
   return listing(service)
  if path=='ai':return service.ai.admin()
- if path=='algorithms':return service.algorithm_hall.listing(user['id'],admin=True)
+ if path=='algorithms':return service.algorithm_hall.page(user['id'],q,admin=True) if 'page' in q else service.algorithm_hall.listing(user['id'],admin=True)
  if path=='algorithm-detail':
   if 'backtest' in q:return service.algorithm_hall.backtest(q.get('id'),q['backtest'],service.cfg['odds'],q.get('interval','1h'),admin=True,cutoff=q.get('cutoff'))
   if 'interval' in q:return service.algorithm_hall.income(q.get('id'),q['interval'],admin=True)
-  return service.algorithm_hall.detail(q.get('id'),q.get('page',1),q.get('page_size',20),admin=True,window=q.get('window'),source=q.get('source','history'))
+  return service.algorithm_hall.detail(q.get('id'),q.get('page',1),q.get('page_size',20),admin=True,window=q.get('window'),source=q.get('source','history'),cutoff=q.get('cutoff'))
  if path=='administrator-members':
   if not is_main_admin(user):raise AuthError('仅 admin 可配置会员可见范围',403,'permission_denied')
   key=int(q.get('id',0));administrator=member_access_target(db,key)
@@ -74,6 +76,7 @@ def check_resource_member(service,user,table,column,key):
 
 def post(service,path,body,user,ip):
  db=service.db;auth=service.auth
+ if path=='trend-risk-save':return service.trend_risk.save(user,body,ip)
  if path=='money-plan-save':
   from .money_plans import save
   return save(service,body,user,ip)
@@ -175,7 +178,7 @@ def post(service,path,body,user,ip):
    if not isinstance(body['site_name'],str) or not 1<=len(body['site_name'].strip())<=40:raise ValueError('站点名称需要1—40个字符')
    for k in ('registration_enabled','collector_enabled','maintenance_guard_enabled'):
     if type(body[k])!=bool:raise ValueError('开关参数必须为布尔值')
-   if type(body['interval_seconds'])!=int or not 15<=body['interval_seconds']<=300:raise ValueError('采集间隔需要15—300秒')
+   if type(body['interval_seconds'])!=int or not 10<=body['interval_seconds']<=300:raise ValueError('采集间隔需要10—300秒')
    cfg=copy.deepcopy(service.cfg);cfg['collector'].update(enabled=body['collector_enabled'],interval_seconds=body['interval_seconds'],maintenance_guard_enabled=body['maintenance_guard_enabled']);service.update_config(cfg)
    with db.tx() as c:
     c.execute("UPDATE web_auth_settings SET value=? WHERE key='site_name'",(body['site_name'].strip(),));c.execute("UPDATE web_auth_settings SET value=? WHERE key='registration_enabled'",(json.dumps(body['registration_enabled']),));auth.audit(c,user['id'],'site_update','site',ip,body)

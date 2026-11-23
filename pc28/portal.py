@@ -28,7 +28,7 @@ def portal_html(service,admin,user):
   source=re.sub(r'<details class="nav-menu"><summary>常用工具</summary>.*?</details>','',source,count=1,flags=re.S)
   for ident in ('home','trend','dragon','missing','stats','analysis'):source=strip_section(source,ident)
   source=source.replace('<script src="/tools.js" defer></script>','').replace('LOCAL RESEARCH','ADMIN CONSOLE')
-  navigation+="""<span class="admin-nav-group">运行管理</span><button data-tab="admin-overview">后台总览</button><button data-tab="strategies">策略管理</button><button data-tab="money-plans">金额配置管理</button><button data-tab="algorithm-hall">算法大厅</button><button data-tab="simulation">模拟账户</button><button data-tab="history-backtest">历史回测</button><button data-tab="admin-ai">AI概率研究</button><span class="admin-nav-group">站点管理</span><button data-tab="admin-administrators">管理员管理</button><button data-tab="admin-permissions">权限管理</button><button data-tab="admin-users">会员管理</button><button data-tab="admin-member-orders">会员订单明细</button><button data-tab="admin-invites">邀请码管理</button><button data-tab="admin-site">站点设置</button><button data-tab="admin-ops">采集与数据</button><button data-tab="admin-robot">机器人推送</button><button data-tab="admin-audit">安全审计</button>"""
+  navigation+="""<span class="admin-nav-group">运行管理</span><button data-tab="admin-overview">后台总览</button><button data-tab="strategies">策略管理</button><button data-tab="money-plans">金额配置管理</button><button data-tab="algorithm-hall">算法大厅</button><button data-tab="simulation">模拟账户</button><button data-tab="history-backtest">历史回测</button><button data-tab="admin-ai">AI概率研究</button><span class="admin-nav-group">站点管理</span><button data-tab="admin-administrators">管理员管理</button><button data-tab="admin-permissions">权限管理</button><button data-tab="admin-users">会员管理</button><button data-tab="admin-member-orders">会员订单明细</button><button data-tab="admin-invites">邀请码管理</button><button data-tab="admin-site">站点设置</button><button data-tab="admin-ops">采集与数据</button><button data-tab="admin-robot">机器人推送</button><button data-tab="admin-trend-risk">策略趋势风控</button><button data-tab="admin-audit">安全审计</button>"""
  else:
   for ident in ('strategies','history-backtest','overview','draws','logs','simulation'):source=strip_section(source,ident)
   source=re.sub(r'<dialog\b.*?</dialog>','',source,flags=re.S)
@@ -41,6 +41,7 @@ def portal_html(service,admin,user):
  source=source.replace('</head>','<script src="/income-chart.js" defer></script></head>',1)
  if admin:source=source.replace('</head>','<link rel="stylesheet" href="/algorithm-hall.css"><script src="/algorithm-hall.js" defer></script></head>',1)
  if admin:source=source.replace('</head>','<link rel="stylesheet" href="/money-plans.css"><script src="/money-plans.js" defer></script></head>',1).replace('<footer>',(service.root/'web/money-plans-section.html').read_text(encoding='utf-8')+'<footer>',1)
+ if admin:source=source.replace('</head>','<link rel="stylesheet" href="/trend-risk.css"><script src="/trend-risk.js" defer></script></head>',1).replace('<footer>',(service.root/'web/trend-risk-section.html').read_text(encoding='utf-8')+'<footer>',1)
  if admin:source=source.replace('<footer>',(service.root/'web/algorithm-hall-section.html').read_text(encoding='utf-8')+'<footer>',1)
  if not admin:source=source.replace('</head>','<link rel="stylesheet" href="/ai-analysis.css"><script src="/ai-analysis.js" defer></script></head>',1)
  if not admin:source=source.replace('<footer>',(service.root/'web/ai-analysis-section.html').read_text(encoding='utf-8')+'<footer>',1)
@@ -71,4 +72,8 @@ def member_center_html(service,user):
  script='account.js' if authenticated else 'member-auth.js'
  if authenticated:
   source=source.replace('<button id="account-logout"', '<button id="account-mfa" type="button" class="secondary">两步验证</button><button id="account-logout"',1)
- return source.replace('<!-- auth-script -->',f'<script src="/mfa-login.js" defer></script><script src="/{script}" defer></script>')
+ source=source.replace('<!-- auth-script -->',f'<script src="/mfa-login.js" defer></script><script src="/{script}" defer></script>')
+ def version(match):
+  path=match.group(1);file=web/path.rsplit('/',1)[-1]
+  return path+'?v='+hashlib.sha256(file.read_bytes()).hexdigest()[:12] if file.is_file() else path
+ return re.sub(r'(?<=["\'])(/[^"\'?]+\.(?:js|css))(?=["\'])',version,source)

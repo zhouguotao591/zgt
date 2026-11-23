@@ -18,11 +18,11 @@ LABELS = """COALESCE(a.name, '历史账号 #' || o.follow_account_id, '账号归
  COALESCE(p.name, '历史平台') platform_name"""
 SUMMARY = """COUNT(*) total,
  COUNT(CASE WHEN status='settled' THEN 1 END) settled,
- COUNT(CASE WHEN status='pending' THEN 1 END) pending,
+ COUNT(CASE WHEN status IN ('pending','awaiting_result') THEN 1 END) pending,
  COALESCE(SUM(CASE WHEN status='settled' THEN pnl END),0) net,
  COALESCE(SUM(CASE WHEN status='settled' THEN stake END),0) invested,
  COALESCE(SUM(CASE WHEN status='settled' THEN stake+pnl END),0) returned,
- COALESCE(SUM(CASE WHEN status='pending' THEN stake END),0) pending_amount"""
+ COALESCE(SUM(CASE WHEN status IN ('pending','awaiting_result') THEN stake END),0) pending_amount"""
 
 
 def midnight(day):
@@ -73,7 +73,7 @@ def dashboard(c, uid):
         LEFT JOIN robot_platforms p ON p.id=a.platform_id
         LEFT JOIN (SELECT follow_account_id,SUM(CASE WHEN status='settled' THEN pnl END) net,
           COUNT(CASE WHEN status='settled' THEN 1 END) settled,
-          SUM(CASE WHEN status='pending' THEN stake END) pending_amount
+          SUM(CASE WHEN status IN ('pending','awaiting_result') THEN stake END) pending_amount
           FROM member_orders WHERE user_id=? GROUP BY follow_account_id) x ON x.follow_account_id IS k.id
         ORDER BY a.id IS NULL,a.deleted,k.id""", (uid,uid,uid,uid))]
     return {'total':total,'principal':principal,'settled_funds':principal+total['net'] if principal is not None else None,
@@ -103,7 +103,7 @@ def orders(c, uid, q):
         where.append(f'julianday({time_column})<julianday(?)')
         args.append(midnight(end+timedelta(days=1)))
     if q.get('status'):
-        if q['status'] not in ('pending','settled','void'):
+        if q['status'] not in ('pending','awaiting_result','settled','void'):
             raise ValueError('订单状态无效')
         where.append('o.status=?')
         args.append(q['status'])
@@ -152,10 +152,13 @@ def order(c, uid, q):
     result = dict(row)
     odds = json.loads(result.pop('odds_json'))
     from .model import settlement
-    result['odds_factor'] = (settlement(result['stake'],result['direction'],result['total'],
-                                      result['outcome'] in ('win','refund'),odds)['factor']
-                             if result['status']=='settled' else None)
-    if result['status']=='pending':
+    result['odds_factor'] = None
+    if result['status']=='settled':
+        paid=settlement(result['stake'],result['direction'],result['total'],result['outcome'] in ('win','refund'),odds)
+        result['odds_factor']=paid['factor']
+        if paid['outcome']!=result['outcome'] and result['credit'] is not None:
+            result['odds_factor']=round(result['credit']*100/result['stake'],1)
+    if result['status'] in ('pending','awaiting_result'):
         result.update(a=None,b=None,c=None)
     return result
 

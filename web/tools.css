@@ -29,22 +29,34 @@ body.strategy-modal-open{overflow:hidden}
 .strategy-dialog button:focus-visible{outline:2px solid #087f7c;outline-offset:2px}
 @media(max-width:600px){.strategy-dialog{width:calc(100vw - 24px);max-height:calc(100dvh - 24px);border-radius:12px}.strategy-dialog-head{padding:14px 16px}.strategy-dialog-head h2{font-size:16px}.strategy-dialog form{padding:18px 16px 0}.strategy-dialog .formgrid{grid-template-columns:1fr;gap:14px}.strategy-dialog form>.actions{margin:16px -16px 0;padding:12px 16px}.strategy-dialog form>.actions button{flex:1}}
 
-/* Bound rule text and protect numeric columns from wrapping. */
-#strategy-catalog table{table-layout:fixed;min-width:1620px}
-#strategy-catalog th:nth-child(1){width:160px}
-#strategy-catalog th:nth-child(2){width:100px}
-#strategy-catalog th:nth-child(3){width:85px}
-#strategy-catalog th:nth-child(4){width:220px}
-#strategy-catalog th:nth-child(5){width:105px}
-#strategy-catalog th:nth-child(6),#strategy-catalog th:nth-child(7){width:85px}
-#strategy-catalog th:nth-child(8),#strategy-catalog th:nth-child(9){width:95px}
-#strategy-catalog th:nth-child(10),#strategy-catalog th:nth-child(11){width:140px}
-#strategy-catalog th:last-child{width:300px}
-#strategy-catalog td{vertical-align:middle;white-space:normal;overflow-wrap:anywhere;word-break:normal}
-#strategy-catalog th:nth-child(n+5):nth-child(-n+11),#strategy-catalog td:nth-child(n+5):nth-child(-n+11){text-align:right;font-variant-numeric:tabular-nums}
+/* Explicit widths for all sixteen strategy columns keep numeric cells readable. */
+#strategy-catalog table{table-layout:fixed;width:2175px;min-width:100%}
+#strategy-catalog th:nth-child(1){width:210px}
+#strategy-catalog th:nth-child(2){width:105px}
+#strategy-catalog th:nth-child(3){width:90px}
+#strategy-catalog th:nth-child(4){width:180px}
+#strategy-catalog th:nth-child(5){width:100px}
+#strategy-catalog th:nth-child(6){width:115px}
+#strategy-catalog th:nth-child(7){width:120px}
+#strategy-catalog th:nth-child(8){width:170px}
+#strategy-catalog th:nth-child(9){width:95px}
+#strategy-catalog th:nth-child(10){width:105px}
+#strategy-catalog th:nth-child(11){width:115px}
+#strategy-catalog th:nth-child(12),#strategy-catalog th:nth-child(13){width:110px}
+#strategy-catalog th:nth-child(14),#strategy-catalog th:nth-child(15){width:145px}
+#strategy-catalog th:last-child{width:260px}
+#strategy-catalog td{vertical-align:middle;white-space:nowrap;overflow-wrap:normal;line-height:1.5}
+#strategy-catalog td:nth-child(2){white-space:normal;overflow-wrap:anywhere}
+#strategy-catalog th:nth-child(n+5):nth-child(-n+7),#strategy-catalog td:nth-child(n+5):nth-child(-n+7),
+#strategy-catalog th:nth-child(n+9):nth-child(-n+15),#strategy-catalog td:nth-child(n+9):nth-child(-n+15){text-align:right;font-variant-numeric:tabular-nums}
+#strategy-catalog .strategy-name,#strategy-catalog .strategy-direction,#strategy-catalog .strategy-cell-text{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;white-space:normal;line-height:1.5}
+#strategy-catalog .strategy-select-row{margin:0;align-items:flex-start}
+#strategy-catalog .strategy-direction{margin-left:24px}
+#strategy-catalog .strategy-row-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px}
+#strategy-catalog .strategy-row-actions button{font-size:12px;padding:5px 6px;min-height:28px;width:100%}
+#strategy-catalog .strategy-backtest-progress{max-height:38px;overflow:hidden;margin-top:5px;white-space:normal}
 
 .strategy-row-actions{display:flex;align-items:center;gap:8px;flex-wrap:nowrap}
-#strategy-catalog .strategy-row-actions button{font-size:12px;padding:8px 10px;min-height:34px;flex:none}
 
 #trend-graph.road-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:22px}
 #trend-graph .road-card{padding:0;overflow:hidden;border:1px solid #d6e1ef;border-radius:12px;background:#fff}

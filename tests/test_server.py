@@ -9,11 +9,13 @@ class ServerTests(unittest.TestCase):
   from pc28.watchdog import root_id
   before=self.s.db.query('SELECT COUNT(*) n FROM web_sessions')[0]['n']
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}));data=json.load(opener.open('http://127.0.0.1:18028/api/health'))
-  self.assertEqual(data,{'ok':True,'service':'pc28','pid':os.getpid(),'root_id':root_id(self.root)});self.assertEqual(self.s.db.query('SELECT COUNT(*) n FROM web_sessions')[0]['n'],before)
+  self.assertEqual(data,{'ok':True,'service':'pc28','pid':os.getpid(),'parent_pid':os.getppid(),'root_id':root_id(self.root)});self.assertEqual(self.s.db.query('SELECT COUNT(*) n FROM web_sessions')[0]['n'],before)
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parent.parent/'data');self.root=Path(self.tmp.name);c=copy.deepcopy(DEFAULT);c['port']=18028;c['collector']['enabled']=False;(self.root/'config.json').write_text(json.dumps(c),encoding='utf8');self.s=Service(self.root);self.server=LocalServer(self.s);self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start();self.url='http://127.0.0.1:18028/admin'
   from pc28.auth import hash_password
-  with self.s.db.tx() as c:uid=c.execute("INSERT INTO web_users(username,password_hash,role,created) VALUES(?,?,?,?)",('testadmin',hash_password('test-password-123'),'admin','2026-01-01')).lastrowid
+  from pc28.trend_strategy import settings
+  self.s.cfg['trend_simulation']['strategies']={axis:{**settings(self.s.cfg,axis),'direction':direction} for axis,direction in [('size','大'),('parity','单')]}
+  with self.s.db.tx() as c:uid=c.execute("INSERT INTO web_users(username,password_hash,role,created) VALUES(?,?,?,?)",('admin',hash_password('test-password-123'),'admin','2026-01-01')).lastrowid
   with self.s.db.tx() as c:session,cookie=self.s.auth.write_session(c,uid,scope='admin',verified=True)
   self.server.token=session['csrf'];self.previous_opener=urllib.request._opener;opener=urllib.request.build_opener();opener.addheaders=[('Cookie',cookie.split(';')[0])];urllib.request.install_opener(opener)
  def tearDown(self):self.server.shutdown();self.server.server_close();self.tmp.cleanup();urllib.request.install_opener(self.previous_opener)
@@ -61,6 +63,17 @@ class ServerTests(unittest.TestCase):
   key=json.load(urllib.request.urlopen(req))['id'];rows=json.load(urllib.request.urlopen(self.url+'/api/strategies'))['strategies'];row=next(r for r in rows if r['id']==key)
   self.assertFalse(row['enabled']);self.assertTrue(row['editable'])
   result=json.load(urllib.request.urlopen(self.url+'/api/strategy-orders?strategy='+key+'&active=0'));self.assertEqual(result['total'],0);self.assertEqual(result['strategy_names'][key],'test custom')
+ def test_compact_status_skips_heavy_lists(self):
+  from unittest.mock import patch
+  with patch.object(self.s.db,'gaps',side_effect=AssertionError('compact response must not scan gaps')):
+   result=json.load(urllib.request.urlopen(self.url+'/api/status?compact=1'))
+  self.assertIn('fresh',result);self.assertIn('next_draw',result);self.assertNotIn('gaps',result);self.assertNotIn('orders',result)
+ def test_strategy_compact_preserves_full_response(self):
+  compact=json.load(urllib.request.urlopen(self.url+'/api/strategies?compact=1'))
+  full=json.load(urllib.request.urlopen(self.url+'/api/strategies'))
+  self.assertEqual([r['id'] for r in compact['strategies']],[r['id'] for r in full['strategies']])
+  self.assertTrue(all('curve' not in r['stats'] for r in compact['strategies']))
+  self.assertTrue(all('curve' in r['stats'] for r in full['strategies']))
  def test_host_rejected(self):
   req=urllib.request.Request(self.url+'/api/status',headers={'Host':'evil.test'})
   with self.assertRaises(urllib.error.HTTPError) as e:urllib.request.urlopen(req)

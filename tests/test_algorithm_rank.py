@@ -1,7 +1,7 @@
 import copy,json,random,unittest
 from datetime import datetime,timedelta,timezone
 from test_follow_strategy import FollowTests,BIG
-from pc28.algorithm_hall import RollingRanking,DEFINITIONS,evaluate,predict
+from pc28.algorithm_hall import RollingRanking,DEFINITIONS,evaluate,predict,MAX_ALGORITHM_LOOKBACK
 from pc28.follow_strategy import defaults,validate,rank_signal
 from pc28.custom_strategy import tick
 from pc28.history_backtest import period_candles,replay,selection
@@ -28,7 +28,7 @@ class RankingTests(unittest.TestCase):
   for window in (10,87,200):
    streaming=RollingRanking('parity',window)
    for i in range(1,len(rows)+1):
-    result=streaming.update(rows[max(0,i-57):i])
+    result=streaming.update(rows[max(0,i-MAX_ALGORITHM_LOOKBACK-1):i])
     if i>=window and i%29==0:
      self.assertEqual(result,RollingRanking('parity',window).update(rows[:i]))
  def test_missing_unverified_future_and_ties(self):
@@ -70,5 +70,5 @@ class RankLiveTests(unittest.TestCase):
   result,backorders=replay(rows,snap)
   matching=next(o for o in backorders if o['target_draw']==136)
   self.assertEqual(matching['direction'],order['direction']);self.assertEqual(matching['algorithm_ids'],e['algorithm_ids'])
-  for field,value in [('rank_window',0),('rank_window',10001),('rank_position',156),('rank_position',True)]:
+  for field,value in [('rank_window',0),('rank_window',10001),('rank_position',42),('rank_position',True)]:
    with self.assertRaises(ValueError):validate(self.s.cfg,{**s,field:value})

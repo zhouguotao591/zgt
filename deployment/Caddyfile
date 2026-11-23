@@ -5,9 +5,11 @@
 	}
 }
 www.pc28-6688.com {
+	encode zstd gzip
 	reverse_proxy 127.0.0.1:8028
 }
 admin.pc28-6688.com {
+	encode zstd gzip
 	redir / /admin/setup 302
 	reverse_proxy 127.0.0.1:8028
 }

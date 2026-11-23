@@ -2,15 +2,16 @@
 from datetime import datetime,timezone
 from zoneinfo import ZoneInfo
 import json
+from .db import defer_missing_orders
 from . import win_pause,maintenance
 from .model import money,settlement,stake_limit_reason,utcnow
 from .strategy_capital import sync_capital
 AXES={'parity':('单双策略',('单','双')),'size':('大小策略',('大','小'))}
-LOOKBACK=20;BASE=50000;INCREMENT=10000;MAX_LOSSES=3
+LOOKBACK=20;BASE=10000;INCREMENT=0;MAX_LOSSES=3
 
 def settings(cfg,axis):
  shared=cfg['simulation']
- result={'direction':None,'win_limit':5,'pause_draws':20,'win_loss_difference_limit':0,'lookback':20,'base_cents':50000,'loss_increment_cents':10000,'max_losses':3,'initial_balance':cfg.get('trend_simulation',{}).get('initial_balance_per_strategy',shared['initial_balance']),**{k:shared[k] for k in ('daily_loss_limit','max_drawdown','max_stake')}}
+ result={'direction':None,'win_limit':5,'pause_draws':20,'win_loss_difference_limit':0,'lookback':20,'base_cents':10000,'loss_increment_cents':0,'max_losses':3,'initial_balance':cfg.get('trend_simulation',{}).get('initial_balance_per_strategy',shared['initial_balance']),**{k:shared[k] for k in ('daily_loss_limit','max_drawdown','max_stake')}}
  result.update(cfg.get('trend_simulation',{}).get('strategies',{}).get(axis,{}));return result
 
 def validate_settings(value,odds):
@@ -94,7 +95,8 @@ def risk_reason(balance,peak,stake,daily,settings,odds):
 def live_tick(db,cfg,now=None):
  now=now or datetime.now(timezone.utc)
  with db.tx() as c:
-  for o in c.execute("SELECT * FROM trend_orders WHERE status='pending' ORDER BY target_draw,strategy").fetchall():
+  defer_missing_orders(c,'trend_orders')
+  for o in c.execute("SELECT * FROM trend_orders WHERE status IN ('pending','awaiting_result') ORDER BY target_draw,strategy").fetchall():
    if c.execute('SELECT 1 FROM conflicts WHERE draw_id=? AND resolved=0 LIMIT 1',(o['target_draw'],)).fetchone():continue
    r=c.execute('SELECT * FROM draws WHERE id=?',(o['target_draw'],)).fetchone()
    if r is None:continue
@@ -102,6 +104,9 @@ def live_tick(db,cfg,now=None):
    pause_state=win_pause.settled({k:a[k] for k in ('win_streak','pause_until','win_loss_difference','difference_paused')},paid['outcome'],o['target_draw'],(json.loads(o['rules_json']) if o['rules_json'] else {}).get('win_limit',5),(json.loads(o['rules_json']) if o['rules_json'] else {}).get('pause_draws',20), (json.loads(o['rules_json']) if o['rules_json'] else {}).get('win_loss_difference_limit',0))
    c.execute("UPDATE trend_orders SET status='settled',pnl=?,hit=?,outcome=?,total=?,settled=? WHERE id=?",(paid['pnl'],int(hit),paid['outcome'],r['total'],utcnow(),o['id']))
    c.execute('INSERT INTO trend_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
+   if o['status']=='awaiting_result':
+    c.execute('UPDATE trend_accounts SET balance=?,peak=MAX(peak,?) WHERE strategy=?',(balance,balance,o['strategy']))
+    continue
    c.execute('UPDATE trend_accounts SET balance=?,peak=MAX(peak,?),losses=?,cycle=cycle+?,win_streak=?,pause_until=?,win_loss_difference=?,difference_paused=? WHERE strategy=?',(balance,balance,losses,int(reset),pause_state['win_streak'],pause_state['pause_until'],pause_state['win_loss_difference'],int(pause_state.get('difference_paused',False)),o['strategy']))
  enabled=cfg.get('trend_simulation',{}).get('enabled_axes',[])
  if not enabled:return {'action':'disabled'}
@@ -143,8 +148,38 @@ def summary(orders,initial):
  for o in settled:bydraw[o['target_draw']]=bydraw.get(o['target_draw'],0)+o['pnl']
  for did,pnl in sorted(bydraw.items()):
   equity+=pnl;peak=max(peak,equity);dd=max(dd,peak-equity);curve.append({'draw':did,'net':equity/100})
- pending=sum(o['stake'] for o in orders if o['status']=='pending')
+ pending=sum(o['stake'] for o in orders if o['status'] in ('pending','awaiting_result'))
  return {'bets':bets,'wins':wins,'refunds':refunds,'win_rate':wins/bets if bets else None,'profitable_win_rate':(wins-refunds)/bets if bets else None,'net':net/100,'investment':investment/100,'roi':net/investment if investment else None,'max_drawdown':dd/100,'pending_stake':pending/100,'initial_balance':initial/100,'balance':(initial+net-pending)/100,'curve':curve[-500:]}
+
+def stored_summaries(db,table):
+ if table not in ('custom_orders','trend_orders'):raise ValueError('Unknown order table')
+ totals=db.query("""SELECT strategy,COUNT(CASE WHEN status='settled' THEN 1 END) bets,
+  COALESCE(SUM(CASE WHEN status='settled' THEN hit END),0) wins,
+  COUNT(CASE WHEN status='settled' AND outcome='refund' THEN 1 END) refunds,
+  COALESCE(SUM(CASE WHEN status='settled' THEN pnl END),0) net,
+  COALESCE(SUM(CASE WHEN status='settled' THEN stake END),0) investment,
+  COALESCE(SUM(CASE WHEN status IN ('pending','awaiting_result') THEN stake END),0) pending
+  FROM """+table+' GROUP BY strategy')
+ curves=db.query("""WITH draws AS (
+  SELECT strategy,target_draw,SUM(pnl) pnl FROM """+table+""" WHERE status='settled' GROUP BY strategy,target_draw
+ ), equity AS (
+  SELECT strategy,target_draw,SUM(pnl) OVER(PARTITION BY strategy ORDER BY target_draw) net FROM draws
+ ), peaks AS (
+  SELECT *,MAX(0,MAX(net) OVER(PARTITION BY strategy ORDER BY target_draw))-net dd,
+  ROW_NUMBER() OVER(PARTITION BY strategy ORDER BY target_draw DESC) position FROM equity
+ ), ranked AS (
+  SELECT *,MAX(dd) OVER(PARTITION BY strategy) max_dd FROM peaks
+ ) SELECT strategy,target_draw,net,max_dd FROM ranked WHERE position<=500 ORDER BY strategy,target_draw""")
+ by={}
+ for r in totals:
+  bets,wins,refunds,net,investment,pending=(r[k] for k in ('bets','wins','refunds','net','investment','pending'))
+  by[r['strategy']]={'bets':bets,'wins':wins,'refunds':refunds,'win_rate':wins/bets if bets else None,
+   'profitable_win_rate':(wins-refunds)/bets if bets else None,'net':net/100,'investment':investment/100,
+   'roi':net/investment if investment else None,'pending_stake':pending/100,'max_drawdown':0,'curve':[]}
+ for r in curves:
+  s=by[r['strategy']];s['max_drawdown']=r['max_dd']/100
+  s['curve'].append({'draw':r['target_draw'],'net':r['net']/100})
+ return by
 
 def status(db,cfg):
  orders=db.query('SELECT * FROM trend_orders ORDER BY target_draw,id');accounts=db.query('SELECT * FROM trend_accounts ORDER BY strategy');by={}

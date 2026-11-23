@@ -4,7 +4,7 @@ from collections import Counter
 from datetime import datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
 from dataclasses import asdict
-from .model import Strategy,money,settlement,rounded_ratio,utcnow
+from .model import Strategy,money,settlement,rounded_ratio,utcnow,direction_hits
 from .trend_strategy import settings as trend_settings,signal,progress,risk_reason,summary
 from .follow_strategy import hourly_signal,next_stake,previous_amount,adjusts_amount,algorithm_signal,settle_algorithm_round,rank_signal
 from .algorithm_hall import VERIFIED,RollingRanking
@@ -34,7 +34,12 @@ def selection(service,key):
  if kind in ('algorithm','algorithm_rank'):snapshot['hidden_algorithms']=sorted(service.algorithm_hall.hidden())
  return snapshot
 def prepare(service,args):
- if not isinstance(args,dict) or 'strategy_id' not in args or set(args)-{'strategy_id','range_mode','start','end','periods'}:raise ValueError('回测参数无效')
+ if not isinstance(args,dict) or 'strategy_id' not in args or set(args)-{'strategy_id','range_mode','start','end','periods','trend_risk'}:raise ValueError('回测参数无效')
+ args=dict(args);risk_rule=args.pop('trend_risk',None)
+ if risk_rule is not None:
+  from .trend_risk import validate
+  risk_rule=validate(risk_rule)
+  if risk_rule['mode']!='auto':raise ValueError('对比回测需使用自动风控模式')
  mode=args.get('range_mode','three_months');spec={'mode':mode}
  if mode not in ('three_months','dates','count'):raise ValueError('回测范围类型无效')
  if mode=='three_months' and set(args)-{'strategy_id','range_mode'}:raise ValueError('默认三个月模式不接受自定义范围')
@@ -53,7 +58,7 @@ def prepare(service,args):
  with service.lock:
   snap=selection(service,args['strategy_id']);snap['maintenance_guard']=service.cfg['collector'].get('maintenance_guard_enabled',True);last=service.db.query('SELECT MAX(id) id FROM draws')[0]['id']
   if last is None:raise ValueError('本地没有开奖记录')
- return {'snapshot':snap,'cutoff_id':last,'as_of':utcnow(),'range':spec}
+ return {'snapshot':snap,'cutoff_id':last,'as_of':utcnow(),'range':spec,'trend_risk':risk_rule}
 def three_months_before(value,months=3):
  month=value.year*12+value.month-1-months;year,m=divmod(month,12);m+=1
  return value.replace(year=year,month=m,day=min(value.day,calendar.monthrange(year,m)[1]))
@@ -200,7 +205,7 @@ def replay(rows,snapshot,on_progress=None):
    state.update(active=True,strategy=asdict(s),cycle=state['cycle']+1,attempt=0,losses=0,stake=stake,waiting_rearm=False)
    if s.key!=state.get('last_key'):state.update(last_key=s.key,last_switch=target)
   if kind in ('majority','previous','single') and not state['cycle']:state['cycle']=1
-  cycle=state['cycle'];axis=s.axis if s else cfg['axis'];hit=r[axis]==direction;paid=settlement(stake,direction,r['total'],hit,odds);balance+=paid['pnl'];daily+=paid['pnl'];peak=max(peak,balance);equity+=paid['pnl'];last_direction=direction
+  cycle=state['cycle'];hit=direction_hits(direction,r['size'],r['parity']);paid=settlement(stake,direction,r['total'],hit,odds);balance+=paid['pnl'];daily+=paid['pnl'];peak=max(peak,balance);equity+=paid['pnl'];last_direction=direction
   state.update(last_settled_draw=target,attempt=step)
   win_pause.settled(state,paid['outcome'],target,cfg.get('win_limit',5 if kind=='majority' else 0),cfg.get('pause_draws',20), cfg.get('win_loss_difference_limit',0));win_stop=(state.get('difference_paused',False) or state.get('pause_until',0)>target)
   if kind=='reversal':
@@ -233,6 +238,13 @@ def execute(service,prepared,on_progress=None):
  total=len(rows)+len(month_rows)
  result,orders=replay(rows,snap,(lambda n,t:on_progress(n,total)) if on_progress else None)
  month_result,_=replay(month_rows,snap,(lambda n,t:on_progress(len(rows)+n,total)) if on_progress else None)
+ if prepared.get('trend_risk'):
+  from .trend_risk_backtest import apply
+  baseline={k:v for k,v in result.items() if k!='curve'}
+  result,orders,risk=apply(rows,orders,snap,prepared['trend_risk'])
+  result.update(skips={**baseline['skips'],'趋势风控拦截':risk['blocked_orders']},periods_skipped=baseline['periods_skipped']+risk['blocked_orders'],trend_risk={**risk,'baseline':baseline})
+  # Comparison runs never replace the ordinary monthly strategy summaries.
+  custom=True
  result['window_returns']={'selected':{'net':result['net'],'bets':result['bets'],'coverage':coverage}} if custom else {'one_month':{'net':month_result['net'],'bets':month_result['bets'],'coverage':month_coverage},'three_months':{'net':result['net'],'bets':result['bets'],'coverage':coverage},'method':'两段均以当前参数快照及独立初始本金回放，预热限于各自窗口；不是截取三个月回测的末月收益'}
  run_id=uuid.uuid4().hex;created=utcnow();prefix='history-'+run_id
  result.update(run_id=run_id,created=created,strategy=snap,coverage=coverage,file='/exports/'+prefix+'.csv',summary_file='/exports/'+prefix+'.json',notes=['仅使用本地最新开奖时间向前3个自然月范围内的记录，预热也不读取更早数据。','按目标期之前的数据判断，使用当前参数及赔率；未模拟当时网络延迟，假设开奖结果当期可用。','回测采用独立初始本金，执行资金限制、轮次、连胜暂停与胜负差值永久暂停；不修改真实模拟账户和订单。','结果为历史假设回放，不代表未来收益；月度/自适应模式仅采用当时已保存的候选快照。'])
@@ -249,10 +261,15 @@ def execute(service,prepared,on_progress=None):
   for o in orders:
    w.writerow({k:o[k]/100 if k in ('stake','credit','pnl') else json.dumps(o[k],ensure_ascii=False) if k in ('algorithm_ids','algorithm_votes') else o[k] for k in columns})
  (folder/(prefix+'.json')).write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')
+ # Serialize outside the write lock; publish the run only after all batches exist.
+ for offset in range(0,len(orders),250):
+  batch=[(run_id,i,json.dumps(orders[i],ensure_ascii=False)) for i in range(offset,min(offset+250,len(orders)))]
+  with service.db.tx() as c:c.executemany('INSERT INTO history_backtest_orders VALUES(?,?,?)',batch)
+  __import__('time').sleep(.01) # Give collection and order settlement writers a turn.
+ encoded=json.dumps(result,ensure_ascii=False)
  with service.db.tx() as c:
-  c.execute('INSERT INTO history_backtest_runs VALUES(?,?,?)',(run_id,created,json.dumps(result,ensure_ascii=False)))
+  c.execute('INSERT INTO history_backtest_runs VALUES(?,?,?)',(run_id,created,encoded))
   if not custom:c.execute('INSERT INTO strategy_backtest_summary(strategy,run_id,created,summary) VALUES(?,?,?,?) ON CONFLICT(strategy) DO UPDATE SET run_id=excluded.run_id,created=excluded.created,summary=excluded.summary',(snap['id'],run_id,created,json.dumps({'window_returns':result['window_returns'],'settings':snap['settings']},ensure_ascii=False)))
-  c.executemany('INSERT INTO history_backtest_orders VALUES(?,?,?)',((run_id,i,json.dumps(o,ensure_ascii=False)) for i,o in enumerate(orders)))
  return result
 
 PERIOD_CANDLES={f'{n}p':n for n in (1,5,10,20,50,100,500)}
@@ -305,6 +322,14 @@ def result_page(db,run_id,page=1,page_size=20,interval='1h'):
   if candles is None:
    records=(json.loads(r[0]) for r in c.execute('SELECT record FROM history_backtest_orders WHERE run_id=? ORDER BY seq',(run_id,)))
    candles=period_candles(records,interval,result['coverage']['first_id'],result['coverage']['last_id']) if interval in PERIOD_CANDLES else income_candles(records,interval,result['coverage']['actual_start'],result['coverage']['actual_end'])
+   if not candles and result.get('trend_risk'):
+    # Even a fully blocked run needs a flat curve to place stop/entry markers.
+    dummy=[{'beijing_time':result['coverage']['actual_start'],'pnl':0}]
+    if interval in PERIOD_CANDLES:
+     dummy[0]['target_draw']=result['coverage']['first_id']
+     candles=period_candles(dummy,interval,result['coverage']['first_id'],result['coverage']['last_id'])
+    else:candles=income_candles(dummy,interval,result['coverage']['actual_start'],result['coverage']['actual_end'])
+    for bar in candles:bar['orders']=0
    if len(cache)>=24:cache.pop(next(iter(cache)),None)
    cache[key]=candles
  return {'result':result,'orders':orders,'total':total,'page':page,'pages':pages,'page_size':page_size,'candles':candles,'candle_interval':interval}

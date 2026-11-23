@@ -3,12 +3,16 @@ import json,re,sqlite3,uuid
 from datetime import datetime,timezone
 from decimal import Decimal,InvalidOperation
 from zoneinfo import ZoneInfo
-from .model import utcnow,settlement
+from .model import utcnow,settlement,DIRECTION_AXES,direction_hits
 
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS member_accounts(user_id INTEGER PRIMARY KEY,principal INTEGER NOT NULL DEFAULT 0,balance INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS member_cash_ledger(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,created TEXT NOT NULL,kind TEXT NOT NULL,amount INTEGER NOT NULL,before_balance INTEGER NOT NULL,after_balance INTEGER NOT NULL,principal_before INTEGER NOT NULL,principal_after INTEGER NOT NULL,order_id INTEGER,actor INTEGER,note TEXT NOT NULL,request_id TEXT UNIQUE);
 CREATE TABLE IF NOT EXISTS member_orders(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL,outbox_id INTEGER NOT NULL UNIQUE,batch_id TEXT,platform_id INTEGER,strategy_name TEXT,target_draw INTEGER NOT NULL,direction TEXT NOT NULL,stake INTEGER NOT NULL,placed_at TEXT NOT NULL,accepted_at TEXT NOT NULL,odds_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',draw_time TEXT,result TEXT,total INTEGER,pnl INTEGER,outcome TEXT,settled_at TEXT);
+CREATE INDEX IF NOT EXISTS member_orders_user_statistics ON member_orders(user_id,status,pnl);
+CREATE INDEX IF NOT EXISTS member_orders_status_draw ON member_orders(status,target_draw);
+CREATE INDEX IF NOT EXISTS member_orders_placed ON member_orders(placed_at);
+CREATE INDEX IF NOT EXISTS member_ledger_created ON member_cash_ledger(created);
 CREATE INDEX IF NOT EXISTS member_orders_user_draw ON member_orders(user_id,target_draw);
 CREATE INDEX IF NOT EXISTS member_ledger_user ON member_cash_ledger(user_id,id);
 CREATE UNIQUE INDEX IF NOT EXISTS member_ledger_order_kind ON member_cash_ledger(order_id,kind) WHERE order_id IS NOT NULL;
@@ -88,7 +92,7 @@ def import_signal(c,service,row,batch_id,placed_at,accepted_at):
  if row['is_test'] or c.execute('SELECT 1 FROM member_orders WHERE outbox_id=?',(row['id'],)).fetchone():return
  frozen_uid=member_id(c,row)
  if not frozen_uid:return
- match=re.fullmatch(r'(大|小|单|双)(\d+(?:\.\d{1,2})?)',row['message'].strip())
+ match=re.fullmatch(r'([大小][单双]|[大小单双])(\d+(?:\.\d{1,2})?)',row['message'].strip())
  if not match:raise ValueError('会员订单无法识别推送方向与金额')
  stake=cents(match[2]);uid=frozen_uid
  if row['push_cents'] is not None and stake!=row['push_cents']:raise ValueError('会员订单金额与推送快照不一致')
@@ -103,6 +107,8 @@ def import_signal(c,service,row,batch_id,placed_at,accepted_at):
  entry(c,uid,'stake',-stake,order_id=cur.lastrowid,note='接收端成功接收跟单信号',created=accepted_at)
 
 def settle_sent(c, service):
+ from .order_confirmation import reconcile_submission_receipts
+ reconcile_submission_receipts(c)
  rows=c.execute("""SELECT o.*,i.batch_id,b.request batch_request,d.draw_utc,
   r.calibration_amount,r.calibrated_at FROM robot_execution e
   JOIN robot_outbox o ON o.id=e.outbox_id JOIN robot_batch_items i ON i.outbox_id=o.id
@@ -133,19 +139,21 @@ def settle_sent(c, service):
 def reverse_execution(c,outbox_id):
  order=c.execute('SELECT * FROM member_orders WHERE outbox_id=?',(outbox_id,)).fetchone()
  if not order or order['outcome']=='execution_rejected':return
- amount=-order['pnl'] if order['status']=='settled' else order['stake'] if order['status']=='pending' else 0
+ amount=-order['pnl'] if order['status']=='settled' else order['stake'] if order['status'] in ('pending','awaiting_result') else 0
  entry(c,order['user_id'],'execution_reversal',amount,order_id=order['id'],note='自动结算后接收端报告执行异常，冲正该笔订单')
  c.execute("UPDATE member_orders SET status='void',pnl=0,outcome='execution_rejected' WHERE id=?",(order['id'],))
  if order['bot_id'] is not None:
   c.execute("UPDATE robot_risk SET paused='自动结算后收到执行异常，请核对资金并校准后人工恢复' WHERE bot_id=?",(order['bot_id'],))
 
 def settle(c,until=None):
+ from .db import defer_missing_orders
+ defer_missing_orders(c,'member_orders')
  until=until or utcnow()
- rows=c.execute("SELECT o.*,d.total drawn_total,d.size drawn_size,d.parity drawn_parity,d.draw_utc FROM member_orders o JOIN draws d ON d.id=o.target_draw WHERE o.status='pending' AND NOT EXISTS(SELECT 1 FROM conflicts x WHERE x.draw_id=o.target_draw AND x.resolved=0) ORDER BY d.draw_utc,o.id").fetchall()
+ rows=c.execute("SELECT o.*,d.total drawn_total,d.size drawn_size,d.parity drawn_parity,d.draw_utc FROM member_orders o JOIN draws d ON d.id=o.target_draw WHERE o.status IN ('pending','awaiting_result') AND NOT EXISTS(SELECT 1 FROM conflicts x WHERE x.draw_id=o.target_draw AND x.resolved=0) ORDER BY d.draw_utc,o.id").fetchall()
  for o in rows:
   if not o['draw_utc'] or datetime.fromisoformat(o['draw_utc'])>datetime.fromisoformat(until):continue
   late=datetime.fromisoformat(o['placed_at'])>=datetime.fromisoformat(o['draw_utc'])
-  hit=o['direction']==(o['drawn_size'] if o['direction'] in ('大','小') else o['drawn_parity'])
+  hit=direction_hits(o['direction'],o['drawn_size'],o['drawn_parity'])
   paid={'pnl':0,'credit':o['stake'],'outcome':'void'} if late else settlement(o['stake'],o['direction'],o['drawn_total'],hit,json.loads(o['odds_json']))
   result=o['drawn_size']+o['drawn_parity']
   c.execute("UPDATE member_orders SET status=?,draw_time=?,result=?,total=?,pnl=?,outcome=?,settled_at=? WHERE id=?",('void' if late else 'settled',o['draw_utc'],result,o['drawn_total'],paid['pnl'],paid['outcome'],utcnow(),o['id']))
@@ -231,10 +239,10 @@ def listing(service,q,ledger=False,user=None):
   if q.get('draw'):
    where.append('o.target_draw=?');args.append(int(q['draw']))
   if q.get('direction'):
-   if q['direction'] not in ('大','小','单','双'):raise ValueError('订单类型无效')
+   if q['direction'] not in DIRECTION_AXES:raise ValueError('订单类型无效')
    where.append('o.direction=?');args.append(q['direction'])
   if q.get('status'):
-   if q['status'] not in ('pending','settled','void'):raise ValueError('订单状态无效')
+   if q['status'] not in ('pending','awaiting_result','settled','void'):raise ValueError('订单状态无效')
    where.append('o.status=?');args.append(q['status'])
  if q.get('start') and q.get('end') and time_filter(q['start'])>time_filter(q['end']):raise ValueError('开始时间不能晚于结束时间')
  table='member_cash_ledger' if ledger else 'member_orders';source=table+' o JOIN web_users u ON u.id=o.user_id';condition=' AND '.join(where)

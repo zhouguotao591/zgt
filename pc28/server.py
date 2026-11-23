@@ -19,8 +19,13 @@ class Handler(BaseHTTPRequestHandler):
   if isinstance(data,(dict,list)):data=json.dumps(data,ensure_ascii=False).encode()
   elif isinstance(data,str):data=data.encode()
   self.send_response(code)
+  if self.command=='POST' and 200<=code<300:
+   self.server.service.db._catalog_cache=None
   if getattr(self,'new_cookie',None):self.send_header('Set-Cookie',self.new_cookie)
-  self.send_header('Referrer-Policy','same-origin');self.send_header('X-Frame-Options','DENY');self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");self.end_headers();self.wfile.write(data)
+  asset=urlparse(self.path)
+  versioned_asset=asset.path.endswith(('.js','.css')) and 'v' in parse_qs(asset.query)
+  cache='private, max-age=86400, immutable' if versioned_asset and code==200 else 'no-store'
+  self.send_header('Referrer-Policy','same-origin');self.send_header('X-Frame-Options','DENY');self.send_header('Content-Type',ctype);self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control',cache);self.send_header('X-Content-Type-Options','nosniff');self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'");self.end_headers();self.wfile.write(data)
  def redirect(self,path):
   self.send_response(303);self.send_header('Location',path);self.send_header('Cache-Control','no-store');self.end_headers()
  def identity(self):return self.server.service.auth.session(self.headers.get('Cookie'),self.scope)
@@ -100,7 +105,7 @@ class Handler(BaseHTTPRequestHandler):
    elif p.path.startswith('/api/'):
     if p.path not in member_apis:raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
     if p.path not in public_apis:auth.require(user)
-   elif p.path.startswith('/exports/') or p.path in ('/strategies.js','/history-backtest.js','/admin.js','/member-admin.js','/admin-bootstrap.js','/access-admin.js','/access-management.js','/profit-curve.js','/robot.js','/robot-management.js','/money-plans.js','/ai-admin.js'):raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
+   elif p.path.startswith('/exports/') or p.path in ('/trend-risk.js','/trend-risk.css','/strategies.js','/history-backtest.js','/admin.js','/member-admin.js','/admin-bootstrap.js','/access-admin.js','/access-management.js','/profit-curve.js','/robot.js','/robot-management.js','/money-plans.js','/ai-admin.js'):raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
    elif p.path!='/' and p.path not in public_assets:auth.require(user)
    if p.path=='/':self.send(200,portal_html(s,False,user),'text/html; charset=utf-8');return
    if p.path=='/api/admin/access':
@@ -118,15 +123,18 @@ class Handler(BaseHTTPRequestHandler):
     protect(auth,rows[0]);self.send(200,{'grants':sorted(grants(auth,rows[0]))});return
    if p.path.startswith('/api/admin/'):
     from .admin import get
-    with s.lock:result=get(s,p.path.split('/')[-1],{k:v[0] for k,v in parse_qs(p.query).items()},user)
+    result=get(s,p.path.split('/')[-1],{k:v[0] for k,v in parse_qs(p.query).items()},user)
     self.send(200,result);return
    if p.path=='/api/simulation-summary':
     from .strategies import catalog
-    with s.lock:rows=catalog(s.db,s.cfg)['strategies']
+    import copy
+    with s.lock:cfg=copy.deepcopy(s.cfg)
+    rows=catalog(s.db,cfg)['strategies']
     metrics={'bets','wins','refunds','win_rate','profitable_win_rate','net','investment','roi','max_drawdown','pending_stake','initial_balance','balance','curve'}
     self.send(200,{'strategies':[{**{k:r[k] for k in ('id','name','enabled')},'stats':{k:v for k,v in r['stats'].items() if k in metrics}} for r in rows if r['enabled']]});return
    if p.path=='/api/status':
-    result=s.status()
+    compact=self.admin_scope and parse_qs(p.query).get('compact')==['1']
+    result=s.status(compact=True) if compact else s.status()
     from .permissions import owner
     if not self.admin_scope or not owner(auth,user):
      for key in ('orders','decisions','tasks','jobs','selections','switches','rounds'):result[key]=[]
@@ -138,12 +146,14 @@ class Handler(BaseHTTPRequestHandler):
    if p.path=='/api/strategy-center':
     from .strategy_center import listing
     self.send(200,listing(s));return
-   if p.path=='/api/algorithms':self.send(200,s.algorithm_hall.listing(user['id']));return
+   if p.path=='/api/algorithms':
+    q={k:v[0] for k,v in parse_qs(p.query).items()}
+    self.send(200,s.algorithm_hall.page(user['id'],q) if 'page' in q else s.algorithm_hall.listing(user['id']));return
    if p.path=='/api/algorithm-detail':
     q=parse_qs(p.query);key=q.get('id',[''])[0]
     if 'backtest' in q:result=s.algorithm_hall.backtest(key,q['backtest'][0],s.cfg['odds'],q.get('interval',['1h'])[0],cutoff=q.get('cutoff',[None])[0])
     elif 'interval' in q:result=s.algorithm_hall.income(key,q['interval'][0])
-    else:result=s.algorithm_hall.detail(key,q.get('page',['1'])[0],q.get('page_size',['20'])[0],window=q.get('window',[None])[0],source=q.get('source',['history'])[0])
+    else:result=s.algorithm_hall.detail(key,q.get('page',['1'])[0],q.get('page_size',['20'])[0],window=q.get('window',[None])[0],source=q.get('source',['history'])[0],cutoff=q.get('cutoff',[None])[0])
     self.send(200,result);return
    if p.path=='/api/tools':self.send(200,s.tools.run({k:v[0] for k,v in parse_qs(p.query).items()}));return
    if p.path=='/api/strategy-profit-curve':
@@ -170,7 +180,11 @@ class Handler(BaseHTTPRequestHandler):
     self.send(200,dict(task));return
    if p.path=='/api/strategies':
     from .strategies import catalog
-    with s.lock:result=catalog(s.db,s.cfg,dict(s.tasks))
+    import copy
+    with s.lock:cfg=copy.deepcopy(s.cfg);tasks=dict(s.tasks)
+    result=catalog(s.db,cfg,tasks)
+    if parse_qs(p.query).get('compact')==['1']:
+     for row in result['strategies']:row['stats'].pop('curve',None)
     self.send(200,result);return
    if p.path=='/api/strategy-orders':
     from .strategies import order_page
@@ -197,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
     if Path(name).name!=name or not name or '..' in name:raise ValueError('文件路径错误')
     f=s.root/'data/exports'/name
    else:
-    names={'/':'index.html','/app.js':'app.js','/style.css':'style.css','/tools.js':'tools.js','/tools.css':'tools.css','/trend-strategy.js':'trend-strategy.js','/strategies.js':'strategies.js','/history-backtest.js':'history-backtest.js','/admin.js':'admin.js','/member-admin.js':'member-admin.js','/admin-bootstrap.js':'admin-bootstrap.js','/access-admin.js':'access-admin.js','/access-management.js':'access-management.js','/account.js':'account.js','/portal.css':'portal.css','/algorithm-hall.js':'algorithm-hall.js','/income-chart.js':'income-chart.js','/algorithm-hall.css':'algorithm-hall.css','/member-auth.js':'member-auth.js','/member-auth.css':'member-auth.css','/profit-curve.js':'profit-curve.js','/robot.js':'robot.js','/money-plans.js':'money-plans.js','/money-plans.css':'money-plans.css','/robot-management.js':'robot-management.js','/robot-accounts.css':'robot-accounts.css','/ai-analysis.js':'ai-analysis.js','/ai-analysis.css':'ai-analysis.css','/ai-admin.js':'ai-admin.js','/strategy-center.js':'strategy-center.js','/strategy-center.css':'strategy-center.css'}
+    names={'/trend-risk.js':'trend-risk.js','/trend-risk.css':'trend-risk.css','/':'index.html','/app.js':'app.js','/style.css':'style.css','/tools.js':'tools.js','/tools.css':'tools.css','/trend-strategy.js':'trend-strategy.js','/strategies.js':'strategies.js','/history-backtest.js':'history-backtest.js','/admin.js':'admin.js','/member-admin.js':'member-admin.js','/admin-bootstrap.js':'admin-bootstrap.js','/access-admin.js':'access-admin.js','/access-management.js':'access-management.js','/account.js':'account.js','/portal.css':'portal.css','/algorithm-hall.js':'algorithm-hall.js','/income-chart.js':'income-chart.js','/algorithm-hall.css':'algorithm-hall.css','/member-auth.js':'member-auth.js','/member-auth.css':'member-auth.css','/profit-curve.js':'profit-curve.js','/robot.js':'robot.js','/money-plans.js':'money-plans.js','/money-plans.css':'money-plans.css','/robot-management.js':'robot-management.js','/robot-accounts.css':'robot-accounts.css','/ai-analysis.js':'ai-analysis.js','/ai-analysis.css':'ai-analysis.css','/ai-admin.js':'ai-admin.js','/strategy-center.js':'strategy-center.js','/strategy-center.css':'strategy-center.css'}
     if p.path not in names:self.send(404,{'error':'不存在'});return
     f=s.root/'web'/names[p.path]
    if not f.is_file():self.send(404,{'error':'文件不存在'});return

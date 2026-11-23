@@ -5,8 +5,8 @@ The private runtime is never used as a member account or a historical backtest.
 """
 import copy,hashlib,json,uuid
 from datetime import datetime,timezone
-from .db import DB
-from .model import utcnow,settlement
+from .db import DB,defer_missing_orders
+from .model import utcnow,settlement,direction_hits
 from . import router,trend_strategy,custom_strategy
 
 TABLES={'legacy':'orders','trend':'trend_orders','custom':'custom_orders'}
@@ -14,6 +14,7 @@ SCHEMA='''
 CREATE TABLE IF NOT EXISTS strategy_signal_versions(strategy TEXT,version TEXT,settings TEXT NOT NULL,created TEXT NOT NULL,PRIMARY KEY(strategy,version));
 CREATE TABLE IF NOT EXISTS strategy_signals(id INTEGER PRIMARY KEY,strategy TEXT NOT NULL,version TEXT NOT NULL,target_draw INTEGER NOT NULL,cutoff_draw INTEGER NOT NULL,created TEXT NOT NULL,direction TEXT NOT NULL,stake INTEGER NOT NULL DEFAULT 10000,status TEXT NOT NULL DEFAULT 'pending',hit INTEGER,pnl INTEGER,outcome TEXT,total INTEGER,settled TEXT,cycle INTEGER,step INTEGER,odds_json TEXT NOT NULL,evidence TEXT NOT NULL,source_engine TEXT NOT NULL,source_id INTEGER NOT NULL,UNIQUE(source_engine,source_id),UNIQUE(strategy,target_draw));
 CREATE INDEX IF NOT EXISTS signal_strategy_status ON strategy_signals(strategy,status,target_draw);
+CREATE INDEX IF NOT EXISTS signal_statistics_covering ON strategy_signals(strategy,status,hit,pnl,created);
 '''
 
 def initialize(db):
@@ -55,13 +56,14 @@ class Signals:
  def settle(self,now):
   from .algorithm_hall import VERIFIED
   with self.service.db.tx() as c:
-   for o in c.execute("SELECT * FROM strategy_signals WHERE status='pending'").fetchall():
+   defer_missing_orders(c,'strategy_signals')
+   for o in c.execute("SELECT * FROM strategy_signals WHERE status IN ('pending','awaiting_result')").fetchall():
     r=c.execute('SELECT * FROM draws WHERE id=?',(o['target_draw'],)).fetchone()
     if not r or r['verification'] not in VERIFIED or not r['draw_utc'] or datetime.fromisoformat(r['draw_utc'])>now:continue
     if c.execute('SELECT 1 FROM conflicts WHERE draw_id=? AND resolved=0',(r['id'],)).fetchone():continue
     if datetime.fromisoformat(o['created'])>=datetime.fromisoformat(r['draw_utc']):
      c.execute("UPDATE strategy_signals SET status='invalid',outcome='late',settled=? WHERE id=?",(utcnow(),o['id']));continue
-    axis='size' if o['direction'] in ('大','小') else 'parity';hit=r[axis]==o['direction'];paid=settlement(10000,o['direction'],r['total'],hit,json.loads(o['odds_json']))
+    hit=direction_hits(o['direction'],r['size'],r['parity']);paid=settlement(10000,o['direction'],r['total'],hit,json.loads(o['odds_json']))
     c.execute("UPDATE strategy_signals SET status='settled',hit=?,pnl=?,outcome=?,total=?,settled=? WHERE id=?",(int(hit),paid['pnl'],paid['outcome'],r['total'],utcnow(),o['id']))
  def tick(self,now=None):
   now=now or datetime.now(timezone.utc);self.settle(now);self.prepare();self.export();s=self.service;db=self.runtime
@@ -69,9 +71,12 @@ class Signals:
   limit=10057 if not db.tail(1) else 200
   from .algorithm_hall import VERIFIED
   draws=s.db.tail(limit);latest=draws[-1] if draws else None
-  pending=[r['target_draw'] for r in s.db.query("SELECT target_draw FROM strategy_signals WHERE status='pending'")]
-  for target in set(pending):
-   if draws and target<draws[0]['id']:draws.extend(s.db.query('SELECT * FROM draws WHERE id=?',(target,)))
+  if latest:
+   oldest=draws[0]['id']
+   # The main signal can settle before its runtime order, including after a restart.
+   queries=' UNION '.join(f"SELECT target_draw FROM {table} WHERE status IN ('pending','awaiting_result')" for table in TABLES.values())
+   for row in db.query(f'SELECT target_draw FROM ({queries}) WHERE target_draw<?',(oldest,)):
+    draws.extend(s.db.query('SELECT * FROM draws WHERE id=?',(row['target_draw'],)))
   with db.tx() as c:
    fields=[r[1] for r in c.execute('PRAGMA table_info(draws)')];sql='INSERT INTO draws('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+') ON CONFLICT(id) DO UPDATE SET '+','.join(k+'=excluded.'+k for k in fields if k!='id')
    for r in draws:
@@ -133,4 +138,4 @@ class Signals:
   self.cursors=cursors
 
 def stats(db):
- return {r['strategy']:{**r,'win_rate':r['wins']/r['bets'] if r['bets'] else None,'net':r['net']/100,'investment':r['bets']*100,'roi':r['net']/(r['bets']*10000) if r['bets'] else None} for r in db.query("SELECT strategy,COUNT(CASE WHEN status='settled' THEN 1 END) bets,COALESCE(SUM(CASE WHEN status='settled' THEN hit ELSE 0 END),0) wins,COALESCE(SUM(pnl),0) net,MIN(created) started,COUNT(CASE WHEN status='pending' THEN 1 END) pending FROM strategy_signals GROUP BY strategy")}
+ return {r['strategy']:{**r,'win_rate':r['wins']/r['bets'] if r['bets'] else None,'net':r['net']/100,'investment':r['bets']*100,'roi':r['net']/(r['bets']*10000) if r['bets'] else None} for r in db.query("SELECT strategy,COUNT(CASE WHEN status='settled' THEN 1 END) bets,COALESCE(SUM(CASE WHEN status='settled' THEN hit ELSE 0 END),0) wins,COALESCE(SUM(pnl),0) net,MIN(created) started,COUNT(CASE WHEN status='pending' THEN 1 END) pending,COUNT(CASE WHEN status='awaiting_result' THEN 1 END) awaiting_result FROM strategy_signals GROUP BY strategy")}

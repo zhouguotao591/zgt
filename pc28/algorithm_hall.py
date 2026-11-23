@@ -4,6 +4,7 @@ from collections import Counter
 from bisect import bisect_left
 VERIFIED=('full_keno','crosschecked_abc')
 RANK_WINDOW=20
+DIRECTION_LOOKBACKS=(5,10,15,20,30,40,50,60,70,80,90,100,120)
 HALL_WINDOWS=(20,100,500,1000,2000,5000)
 ORDER_CANDLE_SIZES={'1o':1,'20o':20,'50o':50,'100o':100}
 MAX_BACKTEST_DRAWS=50000
@@ -17,7 +18,7 @@ CREATE TABLE IF NOT EXISTS algorithm_favorites(user_id INTEGER NOT NULL,algorith
 def definitions():
  result=[]
  for axis,title in [('size','大小'),('parity','单双')]:
-  for kind,n,name,rule in [('follow',1,'上期跟随','使用上期结果作为下一期判断。'),('reverse',1,'上期反转','使用与上期相反的结果作为下一期判断。'),*[(kind,n,f'近{n}期'+('占优跟随' if kind=='majority' else '少数反转'),f'统计此前{n}期次数，'+('选择较多的一方' if kind=='majority' else '选择较少的一方')+'；持平时跟随上期结果。') for n in range(5,56) for kind in ('majority','minority')],*[("transition",n,f'近{n}期转移跟随',f'观察此前{n}次相邻结果的转移，选择当前结果之后历史出现较多的一方；无样本或持平时跟随上期。') for n in range(5,56)]]:
+  for kind,n,name,rule in [('follow',1,'上期跟随','使用上期结果作为下一期判断。'),('reverse',1,'下期反转','根据上期结果反向预测下一期：上期开大则下期预测小，上期开小则下期预测大；单双同理。'),*[(kind,n,f'近{n}期'+('占优跟随' if kind=='majority' else '少数反转'),f'统计此前{n}期次数，'+('选择较多的一方' if kind=='majority' else '选择较少的一方')+'；持平时跟随上期结果。') for n in DIRECTION_LOOKBACKS for kind in ('majority','minority')],*[("transition",n,f'近{n}期转移跟随',f'观察此前{n}次相邻结果的转移，选择当前结果之后历史出现较多的一方；无样本或持平时跟随上期。') for n in DIRECTION_LOOKBACKS]]:
    result.append({'id':f'{axis}.{kind}.{n}','axis':axis,'category':title,'name':title+' · '+name,'kind':kind,'lookback':n+1 if kind=='transition' else n,'rule':rule,'version':'local-formula-v1'})
  return result
 DEFINITIONS=definitions();BY_ID={r['id']:r for r in DEFINITIONS}
@@ -158,85 +159,105 @@ def backtest_algorithm(draws,definition,periods,odds,interval):
          'directions':directions,'candles':bars}
 
 class AlgorithmHall:
- def __init__(self,db):
+ def __init__(self,db,odds=None):
+  from .algorithm_paper import AlgorithmPaper
+  self.paper=AlgorithmPaper(db,odds)
   self.db=db;self.lock=threading.RLock();self.fingerprint=None;self.cached=[]
   with db.tx() as c:
    for sql in SCHEMA.split(';'):
     if sql.strip():c.execute(sql)
+  from .algorithm_snapshot import HallSnapshots
+  self.snapshots=HallSnapshots(self)
  def snapshot(self):
+  if not hasattr(self,'snapshots'):return self._calculate_snapshot()
+  bundle=self.snapshots.read();return bundle['rows'],bundle['version']
+ def _calculate_snapshot(self):
   with self.lock:
-   draws=self.db.query("""SELECT d.id,d.draw_utc,d.a,d.b,d.c,d.total,d.size,d.parity FROM draws d
-      WHERE d.draw_utc IS NOT NULL AND julianday(d.draw_utc)<=julianday('now')
-      AND d.verification IN ('full_keno','crosschecked_abc')
-      AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.draw_id=d.id AND c.resolved=0)
-      ORDER BY d.id DESC LIMIT 5056""")[::-1]
+   report=self.paper.sync()
+   draws=self.paper.source_tail(max(HALL_WINDOWS)+MAX_ALGORITHM_LOOKBACK)
    latest_stored=self.db.query('SELECT MAX(id) id FROM draws')[0]['id']
-   orders=self.db.query("""SELECT o.id,o.target_draw,o.cutoff_draw,o.direction AS prediction,
-      o.stake,o.pnl,o.hit,o.outcome,o.settled,d.draw_utc AS time,
-      d.a||'+'||d.b||'+'||d.c||' = '||d.total AS formula,
-      json_extract(o.strategy_json,'$.evidence') AS evidence
-      FROM custom_orders o JOIN draws d ON d.id=o.target_draw
-      WHERE o.status='settled' AND o.pnl IS NOT NULL AND o.hit IN (0,1)
-      AND json_extract(o.strategy_json,'$.strategy_type') IN ('algorithm','algorithm_rank')
-      AND o.cutoff_draw=o.target_draw-1 AND julianday(o.created)<julianday(d.draw_utc)
-      AND julianday(d.draw_utc)<=julianday('now') AND d.verification IN ('full_keno','crosschecked_abc')
-      AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.draw_id=o.target_draw AND c.resolved=0)
-      AND NOT EXISTS(SELECT 1 FROM gap_order_tags g WHERE g.engine='custom' AND g.order_id=o.id)
-      ORDER BY o.target_draw,o.id""")
-   fingerprint=hashlib.sha256(json.dumps([draws,latest_stored,orders],sort_keys=True).encode()).hexdigest()
+   fingerprint=hashlib.sha256(json.dumps([self.paper.status().get('version'),DEFINITIONS,latest_stored],sort_keys=True).encode()).hexdigest()
    if fingerprint!=self.fingerprint:
-    self.cached=[]
-    by_algorithm=attributed_orders(orders)
-    cutoff=draws[-1]['id'] if draws else None
-    from .algorithm_library import FormulaHistory
-    prepared=FormulaHistory(draws)
-    self.history_draws=draws
+    cached=[];cutoff=draws[-1]['id'] if draws else None
+    self.history_draws=draws;source_start=self.paper.query('SELECT MIN(draw_utc) t FROM sources')[0]['t']
     for definition in DEFINITIONS:
-     records=by_algorithm[definition['id']]
-     windows=prepared.windows(definition,HALL_WINDOWS)
-     for window in HALL_WINDOWS:
-      windows[str(window)]={**windows[str(window)],
-                            'actual':order_totals(recent_orders(records,cutoff,window))}
+     windows=self.paper.metrics(definition['id'],cutoff,HALL_WINDOWS);state=self.paper.state(definition['id'])
+     for m in windows.values():m['simulation']['history_resets']=state.get('resets',0)
      choice,reason=predict(draws,definition)
      if cutoff!=latest_stored:choice,reason=None,'最新本地开奖尚未核验'
-     pending={'target_draw':cutoff+1 if cutoff is not None else None,'cutoff_draw':cutoff,
-              'prediction':choice,'reason':reason}
-     self.cached.append({**definition,'metrics':windows,'pending':pending,'records':records,
-                         'actual':order_totals(records)})
-    self.fingerprint=fingerprint
+     pending={'target_draw':cutoff+1 if cutoff is not None else None,'cutoff_draw':cutoff,'prediction':choice,'reason':reason,'stake':state.get('next_stake',PAPER_BASE)}
+     history={'win_rate':state.get('wins',0)/state['bets'] if state.get('bets') else None,'count':state.get('bets',0),'net_cents':state.get('balance',PAPER_INITIAL)-PAPER_INITIAL,'investment_cents':state.get('investment',0),'roi':(state.get('balance',PAPER_INITIAL)-PAPER_INITIAL)/state['investment'] if state.get('investment') else None,'initial_balance':PAPER_INITIAL,'max_drawdown_cents':state.get('max_drawdown',0),'start':source_start,'end':draws[-1]['draw_utc'] if draws else None,'last_id':cutoff,'observed':report['source_draws'],'rule':'100U-win-reset-loss25-cap200'}
+     cached.append({**definition,'metrics':windows,'pending':pending,'simulation':state,'library_backtest':history})
+    self.cached=cached;self.fingerprint=fingerprint
    return self.cached,self.fingerprint
  def hidden(self):
   return {r['item_id'] for r in self.db.query("SELECT item_id FROM public_visibility WHERE kind='algorithm' AND published=0")}
  def listing(self,user_id,admin=False):
   rows,version=self.snapshot();counts={r['algorithm_id']:r['n'] for r in self.db.query('SELECT algorithm_id,COUNT(*) n FROM algorithm_favorites GROUP BY algorithm_id')};favorites={r['algorithm_id'] for r in self.db.query('SELECT algorithm_id FROM algorithm_favorites WHERE user_id=?',(user_id,))}
   hidden=self.hidden()
-  backtests={r['algorithm_id']:json.loads(r['result']) for r in self.db.query('SELECT algorithm_id,result FROM algorithm_library_backtests')}
-  return {'algorithms':[{**{k:v for k,v in r.items() if k not in ('records','history_records')},'published':r['id'] not in hidden,'library_backtest':backtests.get(r['id']),'favorite':r['id'] in favorites,'favorites':counts.get(r['id'],0)} for r in rows if admin or r['id'] not in hidden],'version':version,'latest_id':rows[0]['pending']['cutoff_draw'] if rows else None,'note':'历史算法命中率：逐期开奖前仅使用此前已核验数据回放计算，不要求产生订单；缺期或无有效预测不计入命中率。实际下单收益：仅统计已结算的实时算法跟随模拟订单，历史回测及补单不计入；同一订单可能归属多个算法，收益不可跨算法相加。'}
- def detail(self,algorithm_id,page=1,page_size=20,admin=False,window=None,source='history'):
+  backtests={r['id']:r.get('library_backtest') for r in rows}
+  return {'algorithms':[{**{k:v for k,v in r.items() if k not in ('records','history_records')},'published':r['id'] not in hidden,'library_backtest':backtests.get(r['id']),'favorite':r['id'] in favorites,'favorites':counts.get(r['id'],0)} for r in rows if admin or r['id'] not in hidden],'version':version,'latest_id':rows[0]['pending']['cutoff_draw'] if rows else None,'note':'全部数据来自独立模拟订单账本；按100U基础、亏后加25U至200U规则连续结算，窗口不重置金额。'}
+ def page(self,user_id,q,admin=False):
+  """Read an immutable display snapshot; never calculate history in this request."""
+  window=int(q.get('window',20));size=int(q.get('page_size',10));page=max(1,int(q.get('page',1)))
+  axis=q.get('axis','all');sort=q.get('sort','return_rate');term=str(q.get('search','')).strip()[:60].casefold()
+  if window not in HALL_WINDOWS or size not in (10,20,50,100) or axis not in ('all','size','parity'):raise ValueError('算法筛选参数无效')
+  if sort not in ('return_rate','rate','history_rate','current_hit','current_miss','max_hit','max_miss','favorites','name'):raise ValueError('算法排序参数无效')
+  bundle=self.snapshots.read(stale=True);revision=self.snapshots.revision()
+  updating=not self.snapshots.current(bundle,revision)
+  common={'updating':updating,'ready':bundle is not None,'updated_at':bundle['updated_at'] if bundle else None,'refresh_error':self.snapshots.error,'simulation_progress':self.paper.status().get('progress')}
+  if bundle is None:return {**common,'version':'','algorithms':[],'total':0,'page':1,'pages':1,'page_size':size,'latest_id':None,'note':'首次统计正在后台准备，完成后自动显示。'}
+  token=hashlib.sha256(json.dumps([bundle['version'],bundle['revision'],revision['display_revision'],user_id,admin,{k:v for k,v in q.items() if k!='known'}],sort_keys=True).encode()).hexdigest()
+  if q.get('known')==token:return {**common,'version':token,'unchanged':True}
+  hidden=self.hidden();counts={r['algorithm_id']:r['n'] for r in self.db.query('SELECT algorithm_id,COUNT(*) n FROM algorithm_favorites GROUP BY algorithm_id')}
+  favorites={r['algorithm_id'] for r in self.db.query('SELECT algorithm_id FROM algorithm_favorites WHERE user_id=?',(user_id,))}
+  # The historic library is small summary data; detailed records remain on demand.
+  backtests={r['id']:r.get('library_backtest') for r in bundle['rows']}
+  rows=[r for r in bundle['rows'] if (admin or r['id'] not in hidden) and (axis=='all' or r['axis']==axis) and (not term or term in (r['name']+' '+r['id']).casefold()) and (q.get('favorites')!='1' or r['id'] in favorites)]
+  def value(r):
+   if sort=='favorites':return counts.get(r['id'],0)
+   if sort=='history_rate':return backtests.get(r['id'],{}).get('win_rate')
+   if sort=='return_rate':return r['metrics'][str(window)]['simulation'].get('return_rate')
+   return r['metrics'][str(window)].get(sort)
+  leaders=sorted((r for r in rows if r['metrics'][str(window)]['simulation'].get('return_rate') is not None),key=lambda r:(-r['metrics'][str(window)]['simulation']['return_rate'],r['id']))[:3]
+  rows.sort(key=lambda r:(r['name'],r['id']) if sort=='name' else (value(r) is None,-(value(r) if value(r) is not None else 0),r['id']))
+  if q.get('lock')=='1' and q.get('order'):
+   rank={key:i for i,key in enumerate(q['order'].split(',')[:len(DEFINITIONS)])}
+   rows.sort(key=lambda r:rank.get(r['id'],len(DEFINITIONS)))
+  ranking=[r['id'] for r in rows] if q.get('lock')=='1' else []
+  total=len(rows);pages=max(1,(total+size-1)//size);page=min(page,pages)
+  def serialize(r,patterns=False):
+   library=backtests.get(r['id'])
+   metric={k:v for k,v in r['metrics'][str(window)].items() if patterns or k!='hits'}
+   return {**{k:v for k,v in r.items() if k not in ('records','history_records','metrics','simulation')},'metrics':{str(window):metric},'published':r['id'] not in hidden,'favorite':r['id'] in favorites,'favorites':counts.get(r['id'],0),'library_backtest':{k:library.get(k) for k in ('win_rate','count','net_cents','max_drawdown_cents','start','end','last_id','observed')} if library else None}
+  return {**common,'algorithms':[serialize(r) for r in rows[(page-1)*size:page*size]],'leaders':[serialize(r,True) for r in leaders],'version':token,'latest_id':bundle['rows'][0]['pending']['cutoff_draw'] if bundle['rows'] else None,'page':page,'pages':pages,'page_size':size,'total':total,'ranking':ranking,'note':'独立历史模拟：初始10000U，基础100U；赢后回100U，输后加25U，200U输后下一单回100U，退本金保持。窗口只截取结果，不重置金额。'}
+ def detail(self,algorithm_id,page=1,page_size=20,admin=False,window=None,source='history',cutoff=None):
   if algorithm_id not in BY_ID or (not admin and algorithm_id in self.hidden()):raise ValueError('算法不存在或已下架')
   page=int(page);size=int(page_size)
   if size not in (10,20,50,100):raise ValueError('每页条数须为10、20、50、100')
   if window is not None:
    window=int(window)
    if window not in HALL_WINDOWS:raise ValueError('统计窗口须为20、100、500、1000、2000或5000期')
-  rows,version=self.snapshot();r=next(x for x in rows if x['id']==algorithm_id)
-  if source not in ('history','orders'):raise ValueError('明细类型无效')
-  base=evaluate(self.history_draws,BY_ID[algorithm_id],max(HALL_WINDOWS))['records'] if source=='history' else r['records']
-  selected=recent_orders(base,r['pending']['cutoff_draw'],window) if window is not None else base
-  records=list(reversed(selected));total=len(records);pages=max(1,(total+size-1)//size);page=max(1,min(page,pages))
-  return {**{k:v for k,v in r.items() if k not in ('records','history_records')},'records':records[(page-1)*size:page*size],'page':page,'pages':pages,'page_size':size,'total':total,'version':version,'source':source}
+  bundle=self.snapshots.read(stale=True)
+  if bundle is None:raise ValueError('历史模拟正在后台补算，请稍后查询')
+  rows,version=bundle['rows'],bundle['version'];r=next(x for x in rows if x['id']==algorithm_id)
+  if source not in ('history','orders','pattern'):raise ValueError('明细类型无效')
+  end=r['pending']['cutoff_draw']
+  if cutoff is not None:end=min(int(cutoff),end or 0)
+  result=self.paper.records(algorithm_id,end,window,page,size,skips=source=='pattern')
+  if source=='pattern':
+   result['records']=[{k:value[k] for k in ('target_draw','hit','outcome','pnl','stake')} for value in result['records']]
+   return {**result,'id':algorithm_id,'version':version,'simulation_only':True}
+  return {**r,**result,'version':version,'source':'simulation','rule':'100U赢后恢复，亏后加25U，200U亏后回100U，退本保持','simulation_only':True}
  def income(self,algorithm_id,interval='1h',admin=False):
   if algorithm_id not in BY_ID or (not admin and algorithm_id in self.hidden()):raise ValueError('算法不存在或已下架')
-  from datetime import datetime
   from .history_backtest import income_candles
-  rows,_=self.snapshot()
-  item=next(r for r in rows if r['id']==algorithm_id)
-  records=sorted(item['records'],key=lambda r:(datetime.fromisoformat(r['settled'] or r['time']),r['id']))
-  trades=[{'beijing_time':r['settled'] or r['time'],'pnl':r['pnl']} for r in records]
+  bundle=self.snapshots.read(stale=True)
+  if bundle is None:raise ValueError('历史模拟正在后台补算，请稍后查询')
+  item=next(r for r in bundle['rows'] if r['id']==algorithm_id)
+  trades=self.paper.trades(algorithm_id,item['pending']['cutoff_draw']);records=trades
   bars=order_candles(trades,ORDER_CANDLE_SIZES[interval]) if interval in ORDER_CANDLE_SIZES else income_candles(trades,interval)
-  return {'id':algorithm_id,'name':item['name'],'interval':interval,'candles':bars,
-          'start':trades[0]['beijing_time'] if trades else None,'end':trades[-1]['beijing_time'] if trades else None,
-          'orders':len(trades),'net':item['actual']['net']/100}
+  return {'id':algorithm_id,'name':item['name'],'interval':interval,'candles':bars,'start':trades[0]['beijing_time'] if trades else None,'end':trades[-1]['beijing_time'] if trades else None,'orders':len(trades),'net':sum(r['pnl'] for r in records)/100,'simulation_only':True}
  def backtest(self,algorithm_id,periods,odds,interval='1h',admin=False,cutoff=None):
   if algorithm_id not in BY_ID or (not admin and algorithm_id in self.hidden()):raise ValueError('算法不存在或已下架')
   try:periods=int(periods)
@@ -246,13 +267,21 @@ class AlgorithmHall:
    cutoff=int(cutoff)
    if not 1<=cutoff<2**63:raise ValueError('回测截止期号无效')
   if interval not in ('1h','4h','1d',*ORDER_CANDLE_SIZES):raise ValueError('K线分组无效')
-  definition=BY_ID[algorithm_id]
-  rows=self.db.query("""SELECT d.id,d.draw_utc,d.a,d.b,d.c,d.total,d.size,d.parity FROM draws d
-    WHERE d.id<=? AND d.draw_utc IS NOT NULL AND julianday(d.draw_utc)<=julianday('now')
-    AND d.verification IN ('full_keno','crosschecked_abc')
-    AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.draw_id=d.id AND c.resolved=0)
-    ORDER BY d.id DESC LIMIT ?""",(cutoff if cutoff is not None else 2**63-1,periods+definition['lookback']))
-  return backtest_algorithm(rows[::-1],definition,periods,odds,interval)
+  bundle=self.snapshots.read(stale=True)
+  if bundle is None:raise ValueError('历史模拟正在后台补算，请稍后查询')
+  end=min(cutoff if cutoff is not None else 2**63-1,bundle['rows'][0]['pending']['cutoff_draw'] or 0)
+  records=self.paper.records(algorithm_id,end,periods,1,periods)['records'][::-1]
+  from .history_backtest import income_candles
+  trades=[{'beijing_time':r['time'],'pnl':r['pnl']} for r in records]
+  bars=order_candles(trades,ORDER_CANDLE_SIZES[interval]) if interval in ORDER_CANDLE_SIZES else income_candles(trades,interval)
+  labels=('大','小') if BY_ID[algorithm_id]['axis']=='size' else ('单','双')
+  directions={d:{'actual':0,'predicted':0,'orders':0} for d in labels}
+  for source in self.paper.query('SELECT total FROM sources WHERE id>? AND id<=?',(end-periods,end)):
+   actual=('大' if source['total']>=14 else '小') if BY_ID[algorithm_id]['axis']=='size' else ('单' if source['total']%2 else '双');directions[actual]['actual']+=1
+  for r in records:directions[r['direction']]['predicted']+=1;directions[r['direction']]['orders']+=1
+  net=sum(r['pnl'] for r in records);investment=sum(r['stake'] for r in records);wins=sum(r['hit'] for r in records);peak=drawdown=equity=0
+  for r in records:equity+=r['pnl'];peak=max(peak,equity);drawdown=max(drawdown,peak-equity)
+  return {'id':algorithm_id,'interval':interval,'periods':periods,'observed':min(periods,len(self.paper.query('SELECT id FROM sources WHERE id>? AND id<=?',(end-periods,end)))),'first_draw':records[0]['target_draw'] if records else None,'last_draw':records[-1]['target_draw'] if records else None,'orders':len(records),'wins':wins,'refunds':sum(r['outcome']=='refund' for r in records),'win_rate':wins/len(records) if records else None,'net':net,'investment':investment,'max_drawdown':drawdown,'directions':directions,'candles':bars,'simulation_only':True,'initial_balance':PAPER_INITIAL,'start_balance':records[0]['balance_before'] if records else None,'end_balance':records[-1]['balance_after'] if records else None,'rule':'continuous-ledger-100-loss25-cap200'}
  def favorite(self,user_id,body):
   key=body.get('id');enabled=body.get('favorite')
   if key not in BY_ID or type(enabled)!=bool:raise ValueError('算法或收藏参数无效')

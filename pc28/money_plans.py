@@ -20,8 +20,10 @@ def initialize(c):
 DEFAULTS=dict(mode='fixed',base_cents=10000,loss_increment_cents=10000,win_decrement_cents=10000,multiplier_hundredths=200,max_increase_steps=0,max_decrease_steps=0,min_cents=100,max_cents=2000000,stake_floor='market')
 
 def validate(value):
- if not isinstance(value,dict) or set(value)-set(DEFAULTS):raise ValueError('金额方案参数无效')
- s={**DEFAULTS,**value}
+ if not isinstance(value,dict) or set(value)-set(DEFAULTS)-{'reset_basis'}:raise ValueError('金额方案参数无效')
+ s={**DEFAULTS,'reset_basis':'cumulative',**value}
+ if s['reset_basis'] not in ('cumulative','amount'):raise ValueError('回归计算方式无效')
+ if s['reset_basis']=='amount' and s['mode']!='adjust':raise ValueError('净金额回归仅适用于赢减亏加模式')
  if s['mode'] not in ('fixed','additive','multiply','adjust'):raise ValueError('金额模式无效')
  for k in ('base_cents','min_cents','max_cents','loss_increment_cents','win_decrement_cents'):
   if type(s[k])!=int or not (100 if k in ('base_cents','min_cents','max_cents') else 0)<=s[k]<=2000000 or s[k]%100:raise ValueError('金额须为整数U，单笔范围1—20000U')
@@ -71,14 +73,23 @@ def available(c,key):
  return row
 
 def advance(state,s,order):
- """Refund/void does not advance; win/loss counters accumulate independently."""
+ """Apply the plan's cumulative-count or net-amount reset rule after settlement."""
  if order['outcome'] not in ('win','loss'):return state
  win=order['outcome']=='win';stake=order['stake'];mode=s['mode'];state=dict(state)
  if mode=='fixed':next_stake=s['base_cents']
  elif mode in ('additive','multiply'):
   next_stake=s['base_cents'] if win else stake+s['loss_increment_cents'] if mode=='additive' else rounded_ratio(stake,s['multiplier_hundredths'])
  else:next_stake=stake-s['win_decrement_cents'] if win else stake+s['loss_increment_cents']
- if mode!='fixed':
+ if mode=='adjust' and s.get('reset_basis')=='amount':
+  upper=s['base_cents']+s['max_increase_steps']*s['loss_increment_cents']
+  lower=s['base_cents']-s['max_decrease_steps']*s['win_decrement_cents']
+  reached_upper=s['max_increase_steps']>0 and s['loss_increment_cents']>0 and stake>=upper
+  reached_lower=s['max_decrease_steps']>0 and s['win_decrement_cents']>0 and stake<=lower
+  if reached_upper or reached_lower:next_stake=s['base_cents']
+  difference=next_stake-s['base_cents']
+  state.update(increases=max(0,difference)//s['loss_increment_cents'] if s['loss_increment_cents'] else 0,
+               decreases=max(0,-difference)//s['win_decrement_cents'] if s['win_decrement_cents'] else 0)
+ elif mode!='fixed':
   field='decreases' if win and mode=='adjust' else 'increases' if not win else None
   if field and (s['win_decrement_cents']>0 if field=='decreases' else s['multiplier_hundredths']>100 if mode=='multiply' else s['loss_increment_cents']>0):
    state[field]=state.get(field,0)+1;cap=s['max_decrease_steps' if field=='decreases' else 'max_increase_steps']
@@ -89,7 +100,7 @@ def advance(state,s,order):
 
 def quote(c,subscription):
  plan=available(c,subscription['money_plan_id']);sid=subscription['id'];raw=c.execute('SELECT * FROM money_plan_states WHERE subscription_id=?',(sid,)).fetchone()
- # Never size past an unconfirmed submission or a pending real settlement.
+ # A confirmed gap keeps its exposure but can be bypassed for sizing.
  unresolved=c.execute("""SELECT 1 FROM robot_outbox b LEFT JOIN member_orders o ON o.outbox_id=b.id
  LEFT JOIN robot_execution e ON e.outbox_id=b.id WHERE b.subscription_id=? AND b.is_test=0 AND
  (o.status='pending' OR o.id IS NULL AND (e.status IN ('unconfirmed','submitted','awaiting','executed') OR b.status IN ('pending','retry','sending','sent') AND COALESCE(e.status,'') NOT IN ('rejected','failed','timeout','expired','cancelled'))) LIMIT 1""",(sid,)).fetchone()

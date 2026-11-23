@@ -1,5 +1,6 @@
 from dataclasses import asdict
 from datetime import datetime,timezone
+from .db import defer_missing_orders
 from .model import Strategy,payout,rounded_ratio,money,utcnow,settlement,stake_limit_reason
 import json
 from . import win_pause,maintenance
@@ -58,7 +59,8 @@ def ensure_account(db,cfg):
 def settle(db,cfg):
  # Atomic debit/credit + state; repeated calls or restarts cannot settle twice.
  with db.tx() as c:
-  pending=c.execute("SELECT * FROM orders WHERE status='pending' ORDER BY target_draw").fetchall()
+  defer_missing_orders(c,'orders')
+  pending=c.execute("SELECT * FROM orders WHERE status IN ('pending','awaiting_result') ORDER BY target_draw").fetchall()
   for o in pending:
    if c.execute('SELECT 1 FROM conflicts WHERE draw_id=? AND resolved=0 LIMIT 1',(o['target_draw'],)).fetchone():continue
    r=c.execute('SELECT * FROM draws WHERE id=?',(o['target_draw'],)).fetchone()
@@ -67,8 +69,13 @@ def settle(db,cfg):
    details=json.loads(o['reason']);odds=details['odds'];paid=settlement(o['stake'],s.direction,r['total'],hit,odds);pnl=paid['pnl'];credit=paid['credit'];balance=account['balance']+credit
    details['settlement']=paid
    c.execute('UPDATE orders SET reason=? WHERE id=?',(json.dumps(details,ensure_ascii=False),o['id']))
-   c.execute("UPDATE orders SET status='settled',pnl=?,total=?,settled=? WHERE id=? AND status='pending'",(pnl,r['total'],utcnow(),o['id']))
+   c.execute("UPDATE orders SET status='settled',pnl=?,total=?,settled=? WHERE id=? AND status IN ('pending','awaiting_result')",(pnl,r['total'],utcnow(),o['id']))
    c.execute('INSERT INTO ledger(created,order_id,kind,amount,balance) VALUES(?,?,?,?,?)',(utcnow(),o['id'],'settle',credit,balance))
+   if o['status']=='awaiting_result':
+    c.execute('UPDATE accounts SET balance=?,peak=MAX(peak,?) WHERE id=1',(balance,balance))
+    if o['round_id']:
+     c.execute('UPDATE rounds SET settled_count=settled_count+1 WHERE id=?',(o['round_id'],))
+    continue
    state['attempt']=o['round_attempt'] or state.get('attempt',0)+1;state['losses']=0 if hit else state.get('losses',0)+1;state['stake']=s.base_cents if hit else rounded_ratio(o['stake'],s.multiplier_hundredths)
    state['last_settled_draw']=o['target_draw']
    pause_cfg=details.get('win_pause',{});win_pause.settled(state,paid['outcome'],o['target_draw'],pause_cfg.get('win_limit',0),pause_cfg.get('pause_draws',20), pause_cfg.get('win_loss_difference_limit',0))
@@ -99,7 +106,7 @@ def tick(db,cfg,now=None):
  with db.tx() as c:
   account=dict(c.execute('SELECT * FROM accounts WHERE id=1').fetchone());state=json.loads(account['state'])
   if c.execute('SELECT 1 FROM orders WHERE target_draw=?',(target,)).fetchone():return {'action':'existing','target':target}
-  if c.execute("SELECT 1 FROM orders WHERE status='pending'").fetchone():return {'action':'skip','reason':'存在待补开奖的未结算模拟订单'}
+  if c.execute("SELECT 1 FROM orders WHERE status='pending'").fetchone():return {'action':'skip','reason':'等待上一单开奖结算'}
   pause_reason=win_pause.paused(state,target)
   c.execute('UPDATE accounts SET state=? WHERE id=1',(json.dumps(state,ensure_ascii=False),))
   if pause_reason:
@@ -144,6 +151,7 @@ def tick(db,cfg,now=None):
   if candidate is None:reason=reason or '没有合格且触发的策略'
   if candidate:
    s=Strategy(**candidate['strategy']);stake=state.get('stake',s.base_cents) if state.get('active') else s.base_cents
+   if settings['fixed']['multiplier_hundredths']==100:stake=settings['fixed']['base_cents']
    if len(history)<s.lookback or any(b['id']!=a['id']+1 for a,b in zip(history[-s.lookback:],history[-s.lookback+1:])):reason='策略窗口存在缺期或样本不足'
    lastkey=state.get('last_key');switching=lastkey!=s.key
    if switching and target-state.get('last_switch',-100000)<settings['switch_cooldown_draws']:reason='策略切换冷却中'

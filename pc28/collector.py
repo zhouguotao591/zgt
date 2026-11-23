@@ -97,13 +97,18 @@ def repair_raw_once(db,root,config):
  result={**db.import_records(records,url),**proof};result['pending']=db.query("SELECT COUNT(*) n FROM draws WHERE verification='crosschecked_abc'")[0]['n'];db.log_job('repair_raw','ok',result);return result
 
 
+def missing_order_draws(db,limit=None):
+ tables=('trend_orders','orders','custom_orders','strategy_signals','member_orders')
+ pending=' UNION '.join(f"SELECT target_draw FROM {table} WHERE status IN ('pending','awaiting_result')" for table in tables)
+ sql=f"SELECT target_draw FROM ({pending}) WHERE target_draw < (SELECT MAX(id) FROM draws) AND target_draw NOT IN (SELECT id FROM draws)"
+ return {r['target_draw'] for r in db.query(sql+(' LIMIT 1' if limit==1 else ''))}
+
+
 def repair_pending_once(db,root,config):
  """Recover missing results blocking settlement; never infer a win or cancel a stake."""
  from .ingest import work_records
  from urllib.parse import urlsplit,urlunsplit,urlencode
- targets={r['target_draw'] for r in db.query("SELECT target_draw FROM trend_orders WHERE status='pending' AND target_draw NOT IN (SELECT id FROM draws) UNION SELECT target_draw FROM orders WHERE status='pending' AND target_draw NOT IN (SELECT id FROM draws) UNION SELECT target_draw FROM custom_orders WHERE status='pending' AND target_draw NOT IN (SELECT id FROM draws)")}
- latest=db.tail(1)
- targets={i for i in targets if latest and i<=latest[-1]['id']}
+ targets=missing_order_draws(db)
  if not targets:return {'missing':[],'inserted':0}
  if not config.get('work_fallback_enabled'):return {'missing':sorted(targets),'inserted':0,'reason':'pc28.work备用源未启用'}
  parts=urlparse(config['work_fallback_url']);base=urlunsplit((parts.scheme,parts.netloc,'/bff/market/history','',''));inserted=0

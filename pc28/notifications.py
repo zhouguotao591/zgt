@@ -10,9 +10,10 @@ from zoneinfo import ZoneInfo
 from .bot_secret import SecretStore
 from .model import utcnow
 
-EVENTS = ('order', 'strategy', 'ratio', 'market', 'daily_ratio', 'daily_profit')
+EVENTS = ('order', 'strategy', 'ratio', 'market', 'streak', 'daily_ratio', 'daily_profit')
 HOURLY_GAP_PERCENT = 20
 MARKET_WINDOWS = ((20,12),(30,14))
+STREAK_THRESHOLD = 9
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS notice_subscriptions(
  id INTEGER PRIMARY KEY,name TEXT NOT NULL,chat_id TEXT NOT NULL,
@@ -93,6 +94,37 @@ def special_market(c, now, max_age_seconds=600):
         latest=rows[-1];at=datetime.fromisoformat(latest['draw_utc']).astimezone(ZoneInfo('Asia/Shanghai'))
         enqueue(c,'market',str(latest['id']),f'特殊行情提醒 · 第{latest["id"]}期\n开奖时间：{at:%Y-%m-%d %H:%M:%S}（北京时间）\n\n'+'\n\n'.join(triggered)+'\n\n同一条件持续满足不重复提醒，回落后再次达标重新提醒。')
     c.execute('INSERT INTO notice_market_state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET fingerprint=excluded.fingerprint,active=excluded.active',(fingerprint,json.dumps(current)))
+
+
+def consecutive_market(c, now, max_age_seconds=600):
+    """Notify on the ninth consecutive verified draw, never the tenth or later.
+
+    The tenth row distinguishes a fresh crossing from an already-long run.
+    Persistent notice_events deduplicates polling, process restarts and retries.
+    """
+    if not c.execute("SELECT 1 FROM notice_subscriptions s WHERE enabled=1 AND EXISTS(SELECT 1 FROM json_each(s.events) WHERE value='streak') LIMIT 1").fetchone():return
+    rows=c.execute('SELECT id,draw_utc,size,parity,verification FROM draws ORDER BY id DESC LIMIT ?',(STREAK_THRESHOLD+1,)).fetchall()
+    if not rows:return
+    conflicts={r[0] for r in c.execute('SELECT draw_id FROM conflicts WHERE resolved=0 AND draw_id>=?',(rows[-1]['id'],))}
+    def known(row):
+        try:at=datetime.fromisoformat(row['draw_utc'])
+        except (TypeError,ValueError):return False
+        return at.tzinfo is not None and at<=now and row['verification'] in ('full_keno','crosschecked_abc') and row['id'] not in conflicts and row['size'] in ('大','小') and row['parity'] in ('单','双')
+    latest=rows[0]
+    if not known(latest) or not 0<=(now-datetime.fromisoformat(latest['draw_utc'])).total_seconds()<=max_age_seconds:return
+    triggered=[]
+    for axis in ('size','parity'):
+        direction=latest[axis];count=0;previous=None;first=latest['id']
+        for row in rows:
+            if not known(row) or (previous is not None and (row['id']!=previous['id']-1 or datetime.fromisoformat(row['draw_utc'])>=datetime.fromisoformat(previous['draw_utc']))):break
+            if row[axis]!=direction:break
+            count+=1;first=row['id'];previous=row
+        if count==STREAK_THRESHOLD:
+            triggered.append(f'{direction}：连续出现 {count} 期（第{first}–{latest["id"]}期）')
+    if triggered:
+        at=datetime.fromisoformat(latest['draw_utc']).astimezone(ZoneInfo('Asia/Shanghai'))
+        message=f'特殊行情 · 连续{STREAK_THRESHOLD}期提醒\n截至第{latest["id"]}期\n开奖时间：{at:%Y-%m-%d %H:%M:%S}（北京时间）\n\n'+'\n'.join(triggered)+f'\n\n仅达到第{STREAK_THRESHOLD}期时提醒一次，继续连出不重复；中断后重新计数。\n本消息仅为已开奖行情提醒，不是下单指令。'
+        enqueue(c,'streak',str(latest['id']),message)
 
 
 def daily_reports(c, start, end):
@@ -354,6 +386,7 @@ class Notifications:
                 with self.service.db.tx() as c:
                     expire(c)
                     special_market(c,now,self.service.cfg['collector']['max_age_seconds'])
+                    consecutive_market(c,now,self.service.cfg['collector']['max_age_seconds'])
                     if day!=current.date():
                         schedule_daily(c,now)
                     if hour!=current and (now.minute!=0 or now.second>=30):

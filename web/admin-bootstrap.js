@@ -12,6 +12,7 @@
   {file:'member-admin.js',ready:()=>!!window.pc28MemberAdmin},
   {file:'history-backtest.js',ready:()=>!!window.pc28HistoryReady},
   {file:multiAccounts?'robot-management.js':'robot.js',ready:()=>!!window.pc28RobotReady&&(!multiAccounts||!!window.pc28RobotAccounts)},
+  {file:'trend-risk.js',ready:()=>!!window.pc28TrendRiskReady},
   {file:'ai-admin.js',ready:()=>!!window.pc28AiAdminReady},
   {file:'trend-strategy.js',ready:()=>!!window.pc28TrendReady}
  ];

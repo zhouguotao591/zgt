@@ -1,9 +1,10 @@
 """Independent fixed-parameter strategies, balances and immutable order snapshots."""
 import json,copy,uuid
 from dataclasses import asdict
+from .db import defer_missing_orders
 from . import win_pause,maintenance
 from datetime import datetime,timezone
-from .model import Strategy,money,utcnow,settlement,rounded_ratio
+from .model import Strategy,money,utcnow,settlement,rounded_ratio,direction_hits
 from .trend_strategy import risk_reason,summary
 from .strategy_capital import sync_capital
 SCHEMA="""
@@ -14,6 +15,8 @@ CREATE TABLE IF NOT EXISTS custom_strategies(id TEXT PRIMARY KEY,name TEXT NOT N
 CREATE TABLE IF NOT EXISTS custom_orders(id INTEGER PRIMARY KEY,strategy TEXT,target_draw INTEGER,cutoff_draw INTEGER,created TEXT,direction TEXT,ratio REAL,stake INTEGER,status TEXT,pnl INTEGER,hit INTEGER,outcome TEXT,total INTEGER,settled TEXT,cycle INTEGER,step INTEGER,max_bets INTEGER,strategy_json TEXT,odds_json TEXT,restart_policy TEXT,UNIQUE(strategy,target_draw));
 CREATE TABLE IF NOT EXISTS custom_ledger(id INTEGER PRIMARY KEY,strategy TEXT,order_id INTEGER,created TEXT,kind TEXT,amount INTEGER,balance INTEGER,UNIQUE(order_id,kind));
 CREATE TABLE IF NOT EXISTS custom_decisions(strategy TEXT,target_draw INTEGER,created TEXT,action TEXT,reason TEXT,PRIMARY KEY(strategy,target_draw));
+CREATE INDEX IF NOT EXISTS custom_orders_algorithm_type ON custom_orders(json_extract(strategy_json,'$.strategy_type'),status,target_draw);
+CREATE INDEX IF NOT EXISTS custom_orders_statistics ON custom_orders(strategy,target_draw,status,pnl,stake,hit,outcome);
 CREATE TABLE IF NOT EXISTS strategy_edits(id INTEGER PRIMARY KEY,strategy TEXT,created TEXT,settings TEXT);
 """
 def initialize(db):
@@ -86,15 +89,22 @@ def save(service,body):
 def tick(db,cfg,now=None):
  now=now or datetime.now(timezone.utc)
  with db.tx() as c:
-  for o in c.execute("SELECT * FROM custom_orders WHERE status='pending' ORDER BY target_draw,id").fetchall():
+  defer_missing_orders(c,'custom_orders')
+  for o in c.execute("SELECT * FROM custom_orders WHERE status IN ('pending','awaiting_result') ORDER BY target_draw,id").fetchall():
    if c.execute('SELECT 1 FROM conflicts WHERE draw_id=? AND resolved=0',(o['target_draw'],)).fetchone():continue
    r=c.execute('SELECT * FROM draws WHERE id=?',(o['target_draw'],)).fetchone()
    if not r:continue
    a=c.execute('SELECT * FROM custom_strategies WHERE id=?',(o['strategy'],)).fetchone()
-   kind=json.loads(o['strategy_json']).get('strategy_type')
+   plan=json.loads(o['strategy_json']);kind=plan.get('strategy_type')
    if kind in ('algorithm','algorithm_rank'):
     from .algorithm_hall import VERIFIED
     if r['verification'] not in VERIFIED or not r['draw_utc'] or datetime.fromisoformat(r['draw_utc'])>now:continue
+   if o['status']=='awaiting_result':
+    hit=direction_hits(o['direction'],r['size'],r['parity']);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit']
+    c.execute("UPDATE custom_orders SET status='settled',pnl=?,hit=?,outcome=?,total=?,settled=? WHERE id=?",(paid['pnl'],int(hit),paid['outcome'],r['total'],utcnow(),o['id']))
+    c.execute("INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)",(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
+    c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?) WHERE id=?',(balance,balance,o['strategy']))
+    continue
    if kind in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
     from .follow_strategy import settle_one
     settle_one(c,o,r,a);continue
@@ -107,7 +117,8 @@ def tick(db,cfg,now=None):
    c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
    c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?),state=? WHERE id=?',(balance,balance,json.dumps(st,ensure_ascii=False),o['strategy']))
  rank_windows=[json.loads(r['settings']).get('rank_window',0) for r in db.query('SELECT settings FROM custom_strategies WHERE enabled=1')]
- history=db.tail(max(1001,max(rank_windows,default=0)+56))
+ from .algorithm_hall import MAX_ALGORITHM_LOOKBACK
+ history=db.tail(max(1001,max(rank_windows,default=0)+MAX_ALGORITHM_LOOKBACK))
  if not history:return
  latest=history[-1];target=latest['id']+1
  with db.tx() as c:
@@ -144,6 +155,7 @@ def tick(db,cfg,now=None):
     else:reason=reason or '等待入场条件先退出后再次满足'
    elif not st.get('active') and not s.triggered(history):reason=reason or '未达到入场条件'
    stake=st['stake'] if st.get('active') else s.base_cents
+   if settings['fixed']['multiplier_hundredths']==100:stake=settings['fixed']['base_cents']
    day=now.astimezone(timezone.utc).date().isoformat();daily=c.execute("SELECT COALESCE(SUM(pnl),0) FROM custom_orders WHERE strategy=? AND status='settled' AND substr(settled,1,10)=?",(key,day)).fetchone()[0]
    reason=reason or risk_reason(a['balance'],a['peak'],stake,daily,settings,cfg['odds'])
    if reason:
@@ -157,12 +169,20 @@ def tick(db,cfg,now=None):
    balance=a['balance']-stake;c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(key,cur.lastrowid,utcnow(),'stake',-stake,balance));c.execute('UPDATE custom_strategies SET balance=?,state=? WHERE id=?',(balance,json.dumps(st),key));c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(key,target,utcnow(),'order','场景符合且通过资金检查'))
 def catalog(db):
  rows=[]
+ from .trend_strategy import stored_summaries
+ summaries=stored_summaries(db,'custom_orders')
+ last_by={r['strategy']:r['reason'] for r in db.query("""SELECT d.strategy,d.reason FROM custom_decisions d
+ JOIN (SELECT strategy,MAX(target_draw) target_draw FROM custom_decisions GROUP BY strategy) m
+ ON m.strategy=d.strategy AND m.target_draw=d.target_draw""")}
+ latest=db.tail(1);latest_id=latest[-1]['id'] if latest else 0
  for a in db.query('SELECT * FROM custom_strategies ORDER BY created,id'):
-  settings=json.loads(a['settings']);orders=db.query('SELECT * FROM custom_orders WHERE strategy=? ORDER BY target_draw,id',(a['id'],));last=db.query('SELECT reason FROM custom_decisions WHERE strategy=? ORDER BY target_draw DESC LIMIT 1',(a['id'],))
+  settings=json.loads(a['settings']);last=[{'reason':last_by[a['id']]}] if a['id'] in last_by else []
+  stats=copy.deepcopy(summaries.get(a['id'],summary([],a['initial_balance'])))
+  stats.update(initial_balance=a['initial_balance']/100,balance=a['initial_balance']/100+stats['net']-stats['pending_stake'])
   if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
    from .follow_strategy import rule_text,next_stake,adjusts_amount
-   settings={**{'win_limit':5 if settings['strategy_type']=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0},**settings};settings={**({'win_decrement_cents':0,'stake_floor':'market','max_increase_steps':0,'max_decrease_steps':0} if settings['strategy_type']=='single' else {}),**settings};state=json.loads(a['state']);stats=summary(orders,a['initial_balance']);stats['next_stake']=(state.get('next_stake',settings['base_cents']) if adjusts_amount(settings) else next_stake(settings,state.get('losses',0)))/100
-   rows.append({'id':a['id'],'name':a['name'],'enabled':bool(a['enabled']),'paused':False,'editable':True,'editor_type':settings['strategy_type'],'settings':settings,'status':'已停用' if not a['enabled'] else '等待开奖' if any(o['status']=='pending' for o in orders) else '连胜暂停至'+str(state['pause_until'])+'期' if state.get('pause_until',0)>(db.tail(1)[-1]['id'] if db.tail(1) else 0) else last[0]['reason'] if last else '等待下一期检查','rules':rule_text(settings),'win_streak':state.get('win_streak',0),'pause_until':state.get('pause_until',0),'stats':stats,'follow_start':state.get('follow_start'),'follow_end':state.get('follow_end'),'follow_direction':state.get('direction')});continue
+   settings={**{'win_limit':5 if settings['strategy_type']=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0},**settings};settings={**({'win_decrement_cents':0,'stake_floor':'market','max_increase_steps':0,'max_decrease_steps':0} if settings['strategy_type']=='single' else {}),**settings};state=json.loads(a['state']);stats['next_stake']=(state.get('next_stake',settings['base_cents']) if adjusts_amount(settings) else next_stake(settings,state.get('losses',0)))/100
+   rows.append({'id':a['id'],'name':a['name'],'enabled':bool(a['enabled']),'paused':False,'editable':True,'editor_type':settings['strategy_type'],'settings':settings,'status':'已停用' if not a['enabled'] else '等待开奖' if stats['pending_stake']>0 else '连胜暂停至'+str(state['pause_until'])+'期' if state.get('pause_until',0)>latest_id else last[0]['reason'] if last else '等待下一期检查','rules':rule_text(settings),'win_streak':state.get('win_streak',0),'pause_until':state.get('pause_until',0),'stats':stats,'follow_start':state.get('follow_start'),'follow_end':state.get('follow_end'),'follow_direction':state.get('direction')});continue
   settings={**{'win_limit':0,'pause_draws':20,'win_loss_difference_limit':0},**settings};s=Strategy(**settings['fixed'])
-  rows.append({'id':a['id'],'name':a['name'],'enabled':bool(a['enabled']),'paused':False,'editable':True,'settings':settings,'status':'已停用' if not a['enabled'] else '等待开奖' if any(o['status']=='pending' for o in orders) else last[0]['reason'] if last else '等待下一期检查','rules':f"{s.lookback}期 · 差值{s.threshold}且对侧连开{s.run_length}期（0不限） · 买{s.direction} · 基础{s.base_cents/100:g}U · 亏后{s.multiplier_hundredths/100:g}倍 · 连亏{s.max_losses}停轮（0不限） · 每轮最多{s.max_bets}单，满单后重判入场"+(f"；连续盈利{settings['win_limit']}单暂停{settings['pause_draws']}期" if settings['win_limit'] else ''),'stats':summary(orders,a['initial_balance'])})
+  rows.append({'id':a['id'],'name':a['name'],'enabled':bool(a['enabled']),'paused':False,'editable':True,'settings':settings,'status':'已停用' if not a['enabled'] else '等待开奖' if stats['pending_stake']>0 else last[0]['reason'] if last else '等待下一期检查','rules':f"{s.lookback}期 · 差值{s.threshold}且对侧连开{s.run_length}期（0不限） · 买{s.direction} · 基础{s.base_cents/100:g}U · 亏后{s.multiplier_hundredths/100:g}倍 · 连亏{s.max_losses}停轮（0不限） · 每轮最多{s.max_bets}单，满单后重判入场"+(f"；连续盈利{settings['win_limit']}单暂停{settings['pause_draws']}期" if settings['win_limit'] else ''),'stats':stats})
  return rows

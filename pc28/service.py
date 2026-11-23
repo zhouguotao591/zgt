@@ -5,7 +5,7 @@ from dataclasses import asdict
 from . import config
 from .db import DB
 from .model import Strategy,utcnow
-from .collector import collect_once
+from .collector import collect_once,missing_order_draws
 from .ingest import import_file
 from .engine import Prepared,replay
 from .research import select_month,store_selection,walk_forward
@@ -22,7 +22,7 @@ class Service:
   from .auth import Auth
   self.auth=Auth(self)
   from .algorithm_hall import AlgorithmHall
-  self.algorithm_hall=AlgorithmHall(self.db)
+  self.algorithm_hall=AlgorithmHall(self.db,lambda:self.cfg['odds'])
   from .notifications import Notifications
   self.notifications=Notifications(self)
   from .strategy_signals import initialize as initialize_signals,Signals
@@ -31,6 +31,8 @@ class Service:
   self.robot=RobotSignals(self)
   from .member_orders import initialize as initialize_members
   initialize_members(self)
+  from .trend_risk import TrendRisk
+  self.trend_risk=TrendRisk(self)
   from .ai_analysis import AIAnalysis
   self.ai=AIAnalysis(self)
   from .tools import Tools
@@ -41,6 +43,8 @@ class Service:
   try:self.signals.tick()
   except Exception as e:self.db.log_job('strategy_signals','error',{'error':str(e),'trace':traceback.format_exc()})
  def start(self):
+  self.trend_risk.start()
+  self.algorithm_hall.snapshots.start(self.stop)
   self.worker=threading.Thread(target=self._worker,name='pc28-jobs',daemon=True);self.worker.start();self.collect_worker=threading.Thread(target=self._worker,args=(self.collect_q,),name='pc28-collector',daemon=True);self.collect_worker.start();self.scheduler=threading.Thread(target=self._schedule,name='pc28-scheduler',daemon=True);self.scheduler.start();self.robot.start();self.ai.start()
   threading.Thread(target=self.notifications.run,name='pc28-notifications',daemon=True).start()
  def submit(self,kind,args=None):
@@ -95,7 +99,7 @@ class Service:
     if periodic_due:next_poll=now+c['collector']['interval_seconds']
    if c['collector']['enabled'] and now>=next_repair:
     if self.db.query("SELECT 1 FROM draws WHERE verification='crosschecked_abc' LIMIT 1") and not any(t['kind']=='repair_raw' and t['status'] in ('queued','running') for t in list(self.tasks.values())):self.submit('repair_raw')
-    if self.db.query("SELECT 1 FROM trend_orders WHERE status='pending' AND target_draw NOT IN (SELECT id FROM draws) AND target_draw <= (SELECT MAX(id) FROM draws) UNION SELECT 1 FROM orders WHERE status='pending' AND target_draw NOT IN (SELECT id FROM draws) AND target_draw <= (SELECT MAX(id) FROM draws) UNION SELECT 1 FROM custom_orders WHERE status='pending' AND target_draw NOT IN (SELECT id FROM draws) AND target_draw <= (SELECT MAX(id) FROM draws) LIMIT 1") and not any(t['kind']=='repair_pending' and t['status'] in ('queued','running') for t in list(self.tasks.values())):self.submit('repair_pending')
+    if missing_order_draws(self.db,limit=1) and not any(t['kind']=='repair_pending' and t['status'] in ('queued','running') for t in list(self.tasks.values())):self.submit('repair_pending')
     next_repair=now+60
    gaps=self.db.gaps(1)
    if c['collector']['enabled'] and now>=next_archive and (gaps or c['collector']['archive_url']):
@@ -144,7 +148,7 @@ class Service:
   if kind=='backup':
    name='backup-'+datetime.now().strftime('%Y%m%d-%H%M%S')+'.sqlite3';dest=self.root/'data/exports'/name;self.db.backup(dest);return {'file':'/exports/'+name}
   if kind=='history_backtest':
-   from .history_backtest import execute as run_history
+   from .history_worker import run_isolated as run_history
    def history_progress(done,total):
     if key:self.tasks[key].update(progress=f'已回放 {done}/{total} 期',done=done,total=total,percent=round(done*100/max(1,total),1))
    return run_history(self,args,history_progress)
@@ -206,12 +210,12 @@ class Service:
    if zone:dt=parse_time(r['source_time']).replace(tzinfo=ZoneInfo(zone))
   r['beijing_time']=dt.astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M:%S') if dt else None
   return r
- def status(self):
+ def status(self,compact=False):
   db=self.db;last=db.tail(1);latest=last[0] if last else None;fresh=False;age=None
   if latest and latest['draw_utc']:
    age=(datetime.now(timezone.utc)-datetime.fromisoformat(latest['draw_utc'])).total_seconds();fresh=-30<=age<=self.cfg['collector']['max_age_seconds']
   account=db.query('SELECT * FROM accounts WHERE id=1')[0];account['state']=json.loads(account['state']);account['settled_net']=db.query("SELECT COALESCE(SUM(pnl),0) n FROM orders WHERE status='settled'")[0]['n']/100
-  account['pending_stake']=db.query("SELECT COALESCE(SUM(stake),0) n FROM orders WHERE status='pending'")[0]['n']/100
+  account['pending_stake']=db.query("SELECT COALESCE(SUM(stake),0) n FROM orders WHERE status IN ('pending','awaiting_result')")[0]['n']/100
   health=self.db.query("SELECT status,finished,details FROM jobs WHERE kind='latest' ORDER BY id DESC LIMIT 1")
   collection_health=health[0] if health else None
   if collection_health:collection_health['details']=json.loads(collection_health['details'])
@@ -219,4 +223,5 @@ class Service:
   inferred=infer_break(db) if latest and age is not None and age>210 else None
   plan=inferred or dict(self.draw_timer.state);publication=publication_state(latest,plan)
   if publication['phase']!='live':fresh=False
+  if compact:return {'collection_health':collection_health,'latest':self.display_draw(latest),'publication':publication,'next_draw':plan,'fresh':fresh,'server_time':utcnow()}
   return {'collection_health':collection_health,'version':'1.0.0','count':db.query('SELECT COUNT(*) n FROM draws')[0]['n'],'latest':self.display_draw(latest),'publication':publication,'next_draw':plan,'fresh':fresh,'age_seconds':age,'gaps':db.gaps(),'pending_raw':db.query("SELECT COUNT(*) n FROM draws WHERE verification='crosschecked_abc'")[0]['n'],'conflicts':db.query('SELECT COUNT(*) n FROM conflicts WHERE resolved=0')[0]['n'],'account':account,'orders':db.query('SELECT * FROM orders ORDER BY id DESC LIMIT 60'),'decisions':db.query('SELECT * FROM decisions ORDER BY target_draw DESC LIMIT 30'),'jobs':db.query('SELECT * FROM jobs ORDER BY id DESC LIMIT 20'),'tasks':list(self.tasks.values())[-20:],'selections':db.query('SELECT month,created,run_id,reason,candidates FROM selections ORDER BY month DESC LIMIT 12'),'switches':db.query('SELECT * FROM switches ORDER BY id DESC LIMIT 20'),'rounds':db.query('SELECT * FROM rounds ORDER BY id DESC LIMIT 30'),'restart_policy':self.cfg['simulation'].get('round_restart','immediate'),'mode':self.cfg['simulation']['mode'],'enabled':self.cfg['simulation']['enabled'],'server_time':utcnow()}

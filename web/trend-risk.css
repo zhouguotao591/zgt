@@ -1,0 +1,30 @@
+#admin-trend-risk .table-wrap{max-width:100%;overflow:auto}#tr-table table{min-width:1180px}#tr-table small{display:block;color:#71839a;margin-top:5px}#tr-table .admin-actions{min-width:210px;max-width:270px;display:flex;flex-wrap:wrap;gap:6px}#tr-table button{font-size:12px;padding:6px 10px;min-height:32px}.tr-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.tr-grid label{display:flex;flex-direction:column;gap:8px}#tr-editor{width:min(960px,calc(100vw - 30px))}#tr-log-dialog{width:min(1200px,calc(100vw - 30px))}#tr-chart .hb-k-periods{display:none}#tr-chart{max-width:100%;overflow:hidden}#tr-logs table{min-width:900px}#tr-analysis-text{white-space:pre-wrap;line-height:1.9}@media(max-width:760px){.tr-grid{grid-template-columns:1fr}#tr-editor .admin-dialog-body,#tr-log-dialog .admin-dialog-body{padding:16px}}
+
+.tr-grid [hidden]{display:none!important}
+/* Keep context and actions visible while only the table body scrolls. */
+#admin-trend-risk{--tr-member:150px;--tr-strategy:210px;--tr-actions:240px}
+#admin-trend-risk> .panel{display:flex;flex-direction:column;min-height:400px;height:100dvh;overflow:visible;margin-bottom:0}
+#admin-trend-risk> .panel>.section-head,#admin-trend-risk> .panel>.notice,#tr-filter,#tr-message,#admin-trend-risk> .panel>.admin-pager{flex-shrink:0}
+#admin-trend-risk> .panel>.section-head{position:sticky;top:0;background:#fff;z-index:6;padding:8px 0}
+#admin-trend-risk> .panel>.notice{max-height:80px;overflow:auto;margin:8px 0}
+#tr-filter{margin:8px 0;align-items:end}#tr-message:empty{display:none}
+#tr-table{flex:1;min-height:100px;overflow:auto;position:relative;isolation:isolate;border:1px solid #dce5ee;border-radius:8px;overscroll-behavior:contain}
+#tr-table table{table-layout:fixed;border-collapse:separate;border-spacing:0;min-width:1560px;width:100%}
+#tr-table th,#tr-table td{box-sizing:border-box;white-space:normal;overflow-wrap:anywhere;background:#fff}
+#tr-table th{position:sticky;top:0;z-index:3;background:#f5f8fc}
+#tr-table th:first-child,#tr-table td:first-child{position:sticky;left:0;width:var(--tr-member);min-width:var(--tr-member);max-width:var(--tr-member);z-index:2;white-space:normal}
+#tr-table th:nth-child(2),#tr-table td:nth-child(2){position:sticky;left:var(--tr-member);width:var(--tr-strategy);min-width:var(--tr-strategy);max-width:var(--tr-strategy);z-index:2;box-shadow:5px 0 7px -6px #7890a8}
+#tr-table th:last-child,#tr-table td:last-child{position:sticky;right:0;width:var(--tr-actions);min-width:var(--tr-actions);max-width:var(--tr-actions);z-index:2;box-shadow:-5px 0 7px -6px #7890a8}
+#tr-table th:first-child,#tr-table th:nth-child(2),#tr-table th:last-child{z-index:5;background:#f5f8fc}
+#tr-table .admin-actions{min-width:0;max-width:none;gap:6px}
+#admin-trend-risk>.panel>.admin-pager{position:sticky;bottom:0;z-index:6;background:#fff;border-top:1px solid #dce5ee;padding-top:12px;margin-top:10px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+@media(max-width:760px){
+ #admin-trend-risk{--tr-member:80px;--tr-strategy:100px;--tr-actions:96px}
+ #admin-trend-risk>.panel{padding:10px;min-height:380px}
+ #admin-trend-risk>.panel>.section-head p{font-size:11px;margin:4px 0}
+ #admin-trend-risk>.panel>.notice{max-height:54px;font-size:11px;padding:6px 8px}
+ #tr-table table{min-width:1250px}#tr-table th,#tr-table td{padding:10px 6px;font-size:11px}
+ #tr-table button{padding:5px 6px;font-size:11px;width:100%}
+ #tr-filter{gap:6px}#tr-filter label{flex:1;min-width:0}
+ #admin-trend-risk>.panel>.admin-pager{gap:6px;font-size:11px}#admin-trend-risk>.panel>.admin-pager button{padding:7px}
+}

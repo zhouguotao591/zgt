@@ -2,6 +2,10 @@ import sqlite3,json,hashlib
 from pathlib import Path
 from contextlib import contextmanager
 from .model import convert,utcnow,parse_time,strict_int
+def defer_missing_orders(c,table):
+ # Keep current/future orders blocking until a later draw confirms a gap.
+ c.execute(f"UPDATE {table} SET status='awaiting_result' WHERE status='pending' AND target_draw<(SELECT MAX(id) FROM draws) AND NOT EXISTS(SELECT 1 FROM draws WHERE id={table}.target_draw)")
+
 def source_datetime(value,source,source_timezone=None):
  from datetime import timezone
  from zoneinfo import ZoneInfo
@@ -23,6 +27,7 @@ CREATE TABLE IF NOT EXISTS source_observations(id INTEGER PRIMARY KEY,draw_id IN
 CREATE INDEX IF NOT EXISTS ix_draws_time ON draws(source_time);
 CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,started TEXT,finished TEXT,kind TEXT,status TEXT,details TEXT);
 CREATE TABLE IF NOT EXISTS conflicts(id INTEGER PRIMARY KEY,draw_id INTEGER,received TEXT,old_record TEXT,new_record TEXT,resolved INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS conflicts_draw_status ON conflicts(draw_id,resolved);
 CREATE TABLE IF NOT EXISTS evaluations(id INTEGER PRIMARY KEY,created TEXT,as_of TEXT,status TEXT,parameters TEXT,result TEXT);
 CREATE TABLE IF NOT EXISTS selections(month TEXT PRIMARY KEY,created TEXT,run_id INTEGER,candidates TEXT,reason TEXT);
 CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY CHECK(id=1),balance INTEGER NOT NULL,initial_balance INTEGER NOT NULL,peak INTEGER NOT NULL,paused INTEGER NOT NULL DEFAULT 0,pause_reason TEXT DEFAULT '',state TEXT NOT NULL DEFAULT '{}');
@@ -42,7 +47,9 @@ class DB:
  @contextmanager
  def tx(self):
   c=self.connect()
-  try:c.execute('BEGIN IMMEDIATE');yield c;c.commit()
+  try:
+   c.execute('BEGIN IMMEDIATE');yield c;c.commit()
+   if c.total_changes:self._catalog_cache=None
   except BaseException:c.rollback();raise
   finally:c.close()
  def init(self):

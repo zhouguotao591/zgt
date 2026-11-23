@@ -21,7 +21,7 @@ function toast(message) {
 (() => {
   const el = id => document.getElementById(id);
   const signedIn = document.body.dataset.authenticated === '1';
-  const statuses = {pending:'待开奖',settled:'已记账',void:'已作废'};
+  const statuses = {pending:'待开奖',awaiting_result:'待补开奖',settled:'已记账',void:'已作废'};
   const amount = cents => cents == null ? '—' : (cents/100).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})+' U';
   const rate = value => value == null ? '—' : (value*100).toFixed(2)+'%';
   const time = value => value ? new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(value)) : '—';
@@ -222,7 +222,7 @@ function toast(message) {
       fields(grid,[['订单编号','#'+r.id],['期号',r.target_draw],['下单账号',r.account_name],['机器人',r.bot_name],
         ['开奖时间（北京时间）',time(r.draw_time)],['记账时间（北京时间）',time(r.settled_at)],
         ['开奖',result],['订单方向',r.direction],['推送金额',amount(r.stake)],['状态',statuses[r.status]||'—'],
-        ['结算倍数',r.odds_factor==null?'—':(r.odds_factor/100).toFixed(2)+'×'],['返还',amount(r.credit)],['净收益',amount(r.pnl)]]);
+        ['结算倍数',r.odds_factor==null?'—':(r.odds_factor/100).toFixed(Number.isInteger(r.odds_factor)?2:3)+'×'],['返还',amount(r.credit)],['净收益',amount(r.pnl)]]);
       content.replaceChildren(grid);
       if(navigator.clipboard) {
         const copy=node('button','复制订单编号','secondary');

@@ -10,7 +10,7 @@
     "maintenance_guard_enabled": true,
     "enabled": true,
     "allow_crosschecked_results": true,
-    "interval_seconds": 30,
+    "interval_seconds": 10,
     "timeout_seconds": 15,
     "work_fallback_enabled": true,
     "work_fallback_url": "https://www.pc28.work/bff/market/latest",
@@ -53,7 +53,7 @@
       "max_bets": 8,
       "lookback": 30,
       "base_cents": 10000,
-      "multiplier_hundredths": 200,
+      "multiplier_hundredths": 100,
       "max_losses": 3,
       "kind": "imbalance",
       "run_length": 0

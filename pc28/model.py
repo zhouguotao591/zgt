@@ -5,6 +5,13 @@ from decimal import Decimal, ROUND_HALF_UP
 import hashlib, json
 
 CONVERSION_VERSION = 'abc-columns-v1'
+COMBO_ODDS = {'大单':4315,'小单':4750,'大双':4750,'小双':4315}
+DIRECTION_AXES = {**dict.fromkeys(('大','小'),'size'),**dict.fromkeys(('单','双'),'parity'),**dict.fromkeys(COMBO_ODDS,'combo')}
+
+
+def direction_hits(direction,size,parity):
+    return direction in (size,parity,size+parity)
+
 
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -94,6 +101,12 @@ def settlement(stake, direction, total, hit, odds):
         return {'pnl':-stake,'credit':0,'outcome':'loss','factor':0,'rule':'未命中'}
     if total in odds.get('refund_winning_totals',[]):
         return {'pnl':0,'credit':stake,'outcome':'refund','factor':100,'rule':'0/27命中退本金'}
+    if direction in COMBO_ODDS:
+        if (direction,total) in (('小单',13),('大双',14)):
+            return {'pnl':0,'credit':stake,'outcome':'refund','factor':100,'rule':'小单13 / 大双14退本金'}
+        thousandths=odds.get('combo_thousandths',COMBO_ODDS)[direction]
+        credit=min((stake*thousandths+500)//1000,odds.get('max_return_per_draw_cents',10**18))
+        return {'pnl':credit-stake,'credit':credit,'outcome':'win','factor':thousandths/10,'rule':'组合命中赔率'}
     if total in odds.get('full_payout_totals',[]):
         factor=odds['normal'];rule='13/14命中按2.0倍'
     elif stake >= odds.get('high_stake_threshold_cents',10**18):

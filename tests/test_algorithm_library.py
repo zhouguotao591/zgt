@@ -1,6 +1,6 @@
 import random,unittest
 from datetime import datetime,timedelta,timezone
-from pc28.algorithm_hall import DEFINITIONS,BY_ID,predict,evaluate,HALL_WINDOWS
+from pc28.algorithm_hall import DEFINITIONS,BY_ID,predict,evaluate,HALL_WINDOWS,DIRECTION_LOOKBACKS
 from pc28.algorithm_library import FormulaHistory,full_backtest
 from pc28.config import DEFAULT
 from pc28.model import settlement
@@ -14,10 +14,10 @@ class ExpandedLibraryTests(unittest.TestCase):
    rows.append(dict(id=100+i,size='大' if total>=14 else '小',parity='单' if total%2 else '双',total=total,a=0,b=0,c=0,draw_utc=(t+timedelta(seconds=210*i)).isoformat()))
   return rows
  def test_all_requested_periods_unique_and_legacy_ids_preserved(self):
-  self.assertEqual(len(DEFINITIONS),310);self.assertEqual(len(BY_ID),310)
+  self.assertEqual(len(DEFINITIONS),82);self.assertEqual(len(BY_ID),82)
   for axis in ('size','parity'):
    for kind in ('majority','minority','transition'):
-    self.assertEqual({d['lookback']-(kind=='transition') for d in DEFINITIONS if d['axis']==axis and d['kind']==kind},set(range(5,56)))
+    self.assertEqual({d['lookback']-(kind=='transition') for d in DEFINITIONS if d['axis']==axis and d['kind']==kind},set(DIRECTION_LOOKBACKS))
    for old in ('follow.1','reverse.1','majority.20','minority.50','transition.50'):self.assertIn(axis+'.'+old,BY_ID)
  def test_fast_predictions_match_reference_for_all_algorithms_and_gaps(self):
   rows=self.rows();prepared=FormulaHistory(rows)
@@ -33,7 +33,7 @@ class ExpandedLibraryTests(unittest.TestCase):
     self.assertEqual(windows[str(window)],metrics(records,window),d['id'])
  def test_fixed_stake_batch_uses_same_odds_and_never_places_orders(self):
   rows=self.rows();prepared=FormulaHistory(rows)
-  for key in ('size.majority.55','size.minority.5','parity.transition.55','parity.follow.1'):
+  for key in ('size.majority.120','size.minority.5','parity.transition.120','parity.follow.1'):
    definition=BY_ID[key];result=full_backtest(prepared,rows,definition,DEFAULT['odds'])
    records=evaluate(rows,definition,5000)['records'];by_id={r['id']:r for r in rows};pnl=[]
    for r in records:

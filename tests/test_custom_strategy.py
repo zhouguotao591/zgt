@@ -57,9 +57,9 @@ class CustomStrategyTests(unittest.TestCase):
   self.add(130);tick(self.s.db,self.s.cfg,self.now);settings=copy.deepcopy(self.settings);settings['initial_balance']=200000;save(self.s,{'id':key,'name':'edit','settings':settings});a=self.s.db.query('SELECT * FROM custom_strategies')[0]
   self.assertEqual(a['name'],'edit');self.assertEqual((a['initial_balance'],a['balance']),(20000000,19990000))
  def test_missing_draw_and_conflict_do_not_settle(self):
-  key=self.create();self.enable(key);tick(self.s.db,self.s.cfg,self.now);self.add(131);tick(self.s.db,self.s.cfg,self.now);self.assertEqual(self.s.db.query('SELECT status FROM custom_orders')[0]['status'],'pending');self.add(130)
+  key=self.create();self.enable(key);tick(self.s.db,self.s.cfg,self.now);self.add(131);tick(self.s.db,self.s.cfg,self.now);self.assertEqual(self.s.db.query('SELECT status FROM custom_orders')[0]['status'],'awaiting_result');self.add(130)
   with self.s.db.tx() as c:c.execute('INSERT INTO conflicts(draw_id,resolved) VALUES(130,0)')
-  tick(self.s.db,self.s.cfg,self.now);self.assertEqual(self.s.db.query('SELECT status FROM custom_orders')[0]['status'],'pending')
+  tick(self.s.db,self.s.cfg,self.now);self.assertEqual(self.s.db.query('SELECT status FROM custom_orders')[0]['status'],'awaiting_result')
  def test_validation_and_catalog(self):
   bad=copy.deepcopy(self.settings);bad['fixed']['base_cents']=-1
   for body in ({'name':'','settings':self.settings},{'name':'x','settings':bad},{'name':'x','settings':{'enabled':True}}):

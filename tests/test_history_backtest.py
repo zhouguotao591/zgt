@@ -9,6 +9,47 @@ from pc28.engine import Prepared,replay as replay_fixed
 from pc28.follow_strategy import defaults
 from pc28.custom_strategy import save
 class HistoryBacktestTests(unittest.TestCase):
+ def test_isolated_replay_matches_and_does_not_hold_service_lock(self):
+  from pc28.history_worker import run_isolated
+  import threading
+  prepared=prepare(self.s,{'strategy_id':'size','range_mode':'count','periods':20})
+  expected=execute(self.s,prepared)
+  output={};collected=[]
+  def progress(done,total):
+   if not collected:
+    self.s.db.import_records([{'id':190,'time':self.now.isoformat(),'numbers':list(range(1,21))}],'concurrent-collector')
+    collected.append(190)
+  def run():
+   try:output['value']=run_isolated(self.s,prepared,progress)
+   except Exception as e:output['error']=e
+  with self.s.lock:
+   worker=threading.Thread(target=run);worker.start();worker.join(30)
+   self.assertFalse(worker.is_alive(),'Replay must not acquire the live execution lock')
+  if 'error' in output:raise output['error']
+  actual=output['value']
+  self.assertEqual(collected,[190])
+  self.assertEqual(actual['coverage']['last_id'],189)
+  self.assertEqual(actual['execution']['isolation'],'process')
+  self.assertNotEqual(actual['execution']['worker_pid'],__import__('os').getpid())
+  for key in ('net','bets','balance','coverage'):self.assertEqual(expected[key],actual[key])
+  self.assertEqual(self.s.db.query('select count(*) n from history_backtest_orders where run_id=?',(actual['run_id'],))[0]['n'],actual['bets'])
+
+ def test_trend_comparison_snapshots_rules_and_keeps_ordinary_summary(self):
+  from pc28.trend_risk import DEFAULT as RISK
+  baseline=execute(self.s,prepare(self.s,{'strategy_id':'size'}))
+  saved=self.s.db.query('select * from strategy_backtest_summary')
+  prepared=prepare(self.s,{'strategy_id':'size','trend_risk':{**RISK,'mode':'auto','unknown_policy':'allow'}})
+  actual=execute(self.s,prepared)
+  self.assertEqual(actual['net'],baseline['net'])
+  self.assertEqual(actual['trend_risk']['baseline']['net'],baseline['net'])
+  self.assertEqual(saved,self.s.db.query('select * from strategy_backtest_summary'))
+  self.assertEqual(actual['trend_risk']['settings']['source'],'signal')
+  blocked=execute(self.s,prepare(self.s,{'strategy_id':'size','range_mode':'count','periods':20,'trend_risk':{**RISK,'mode':'auto'}}))
+  self.assertEqual(blocked['bets'],0)
+  flat=result_page(self.s.db,blocked['run_id'])['candles']
+  self.assertTrue(flat)
+  self.assertTrue(all(b['close']==0 and b['orders']==0 for b in flat))
+
  def test_candles_use_every_order_and_carry_empty_periods(self):
   orders=[{'beijing_time':'2026-01-01 00:10:00','pnl':10000},{'beijing_time':'2026-01-01 00:20:00','pnl':-20000},{'beijing_time':'2026-01-01 00:30:00','pnl':5000},{'beijing_time':'2026-01-01 02:00:00','pnl':2500}]
   bars=income_candles(orders,'1h','2026-01-01T00:00:00+08:00','2026-01-01T03:00:00+08:00')
@@ -74,7 +115,7 @@ class HistoryBacktestTests(unittest.TestCase):
   self.assertEqual(metadata(self.s)['runs'][0]['id'],r['run_id'])
  def test_submit_snapshot_and_cutoff_are_immutable(self):
   p,_,_=self.selected();self.s.cfg['trend_simulation']['strategies']={'size':{**trend_strategy.settings(self.s.cfg,'size'),'base_cents':25000}}
-  self.s.db.import_records([{'id':190,'time':self.now.isoformat(),'numbers':list(range(1,21))}],'later');r=execute(self.s,p);self.assertEqual(r['coverage']['last_id'],189);self.assertEqual(r['strategy']['settings']['base_cents'],50000)
+  self.s.db.import_records([{'id':190,'time':self.now.isoformat(),'numbers':list(range(1,21))}],'later');r=execute(self.s,p);self.assertEqual(r['coverage']['last_id'],189);self.assertEqual(r['strategy']['settings']['base_cents'],p['snapshot']['settings']['base_cents'])
  def test_conflicts_and_future_time_excluded_and_gaps_not_bridged(self):
   p,_,_=self.selected();raw=self.s.db.rows();rows,coverage=source_window(raw,{150},p['as_of']);r,orders=replay(rows,p['snapshot']);self.assertEqual(coverage['missing_periods'],1);self.assertFalse(any(150<=o['target_draw']<=170 for o in orders))
   future={**raw[-1],'id':999,'draw_utc':(self.now+timedelta(days=1)).isoformat()};rows,c=source_window([*raw,future],set(),p['as_of']);self.assertEqual(rows[-1]['id'],189);self.assertEqual(c['excluded']['未来时间'],1)

@@ -16,9 +16,9 @@ def delete(service,body):
   if not row:raise ValueError('策略不存在')
   if row['enabled']:raise ValueError('请先停用策略，再删除')
   with service.db.tx() as c:
-   if key=='legacy':pending=c.execute("SELECT 1 FROM orders WHERE status='pending'").fetchone()
-   elif key in ('size','parity'):pending=c.execute("SELECT 1 FROM trend_orders WHERE strategy=? AND status='pending'",(key,)).fetchone()
-   else:pending=c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone()
+   if key=='legacy':pending=c.execute("SELECT 1 FROM orders WHERE status IN ('pending','awaiting_result')").fetchone()
+   elif key in ('size','parity'):pending=c.execute("SELECT 1 FROM trend_orders WHERE strategy=? AND status IN ('pending','awaiting_result')",(key,)).fetchone()
+   else:pending=c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status IN ('pending','awaiting_result')",(key,)).fetchone()
    if pending:raise ValueError('请等待已有订单结算后再删除')
    c.execute('INSERT INTO deleted_strategies(id,name,deleted_at) VALUES(?,?,?)',(key,row['name'],utcnow()))
  return {'ok':True,'id':key}

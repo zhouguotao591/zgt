@@ -4,7 +4,7 @@
  const el=id=>document.getElementById('mf-'+id),money=v=>v==null?'—':num(v/100),date=v=>esc(beijingTime(v));
  const state={orders:{page:1,pages:1,filters:{},busy:false},ledger:{page:1,pages:1,filters:{},busy:false}};
  let editing=null,requestId='';
- const status={pending:'待开奖',settled:'已结算',void:'作废退款'},outcome={execution_rejected:'执行异常（已冲正）',win:'盈利',loss:'亏损',refund:'退本金',void:'作废退回'};
+ const status={pending:'待开奖',awaiting_result:'待补开奖',settled:'已结算',void:'作废退款'},outcome={execution_rejected:'执行异常（已冲正）',win:'盈利',loss:'亏损',refund:'退本金',void:'作废退回'};
  function pager(kind,d){const s=state[kind];Object.assign(s,{page:d.page,pages:d.pages});el(kind+'-page').textContent=`第 ${d.page} / ${d.pages} 页 · 共 ${num(d.total)} 条`;document.querySelectorAll(`[data-mf-page="${kind}"]`).forEach(b=>b.disabled=['first','prev'].includes(b.dataset.move)?d.page<=1:d.page>=d.pages);}
  async function load(kind){const s=state[kind];if(s.busy)return;s.busy=true;try{
   const q=new URLSearchParams({page:s.page,page_size:el(kind+'-size').value,...s.filters});

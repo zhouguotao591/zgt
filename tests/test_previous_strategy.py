@@ -74,3 +74,30 @@ class PreviousStrategyTests(unittest.TestCase):
   for i,side in enumerate(sequence[1:],1):self.step(self.draw(i,side)+timedelta(seconds=1))
   p=prepare(self.s,{'strategy_id':key});rows,_=source_window(self.s.db.rows(),set(),p['as_of']);_,expected=replay(rows,p['snapshot']);actual=self.s.db.query("SELECT target_draw,stake,pnl FROM custom_orders WHERE strategy=? AND status='settled' ORDER BY target_draw",(key,))
   self.assertEqual([(o['target_draw'],o['stake'],o['pnl']) for o in actual],[(o['target_draw'],o['stake'],o['pnl']) for o in expected]);self.assertEqual([o['stake'] for o in actual[:4]],[10000,13000,10000,13000])
+
+ def test_all_new_defaults_use_fixed_100(self):
+  from pc28.trend_strategy import settings as trend_settings
+  for axis in ('size','parity'):
+   rule=trend_settings(self.cfg,axis)
+   self.assertEqual((rule['base_cents'],rule['loss_increment_cents']),(10000,0))
+  self.assertEqual(self.cfg['simulation']['fixed']['multiplier_hundredths'],100)
+  for kind in ('hourly','majority','single','previous','algorithm','algorithm_rank'):
+   rule=defaults(self.cfg,kind)
+   self.assertEqual((rule['base_cents'],rule['loss_increment_cents'],rule['multiplier_hundredths']),(10000,0,100))
+   self.assertEqual(rule.get('win_decrement_cents',0),0)
+   validate(self.cfg,rule)
+
+ def test_fixed_amount_ignores_stale_previous_order_sizing(self):
+  key,settings=self.create(win_decrement_cents=0,loss_increment_cents=0)
+  self.step(self.draw(0,'大')+timedelta(seconds=1))
+  with self.s.db.tx() as c:
+   row=c.execute('SELECT id,strategy_json FROM custom_orders WHERE strategy=?',(key,)).fetchone()
+   plan=json.loads(row['strategy_json'])
+   plan['settings'].update(base_cents=50000,loss_increment_cents=10000,win_decrement_cents=10000)
+   c.execute('UPDATE custom_orders SET strategy_json=? WHERE id=?',(json.dumps(plan),row['id']))
+   state=json.loads(c.execute('SELECT state FROM custom_strategies WHERE id=?',(key,)).fetchone()[0])
+   state['next_stake']=50000
+   c.execute('UPDATE custom_strategies SET state=? WHERE id=?',(json.dumps(state),key))
+  for i,side in enumerate(['小','大','小'],1):
+   self.step(self.draw(i,side)+timedelta(seconds=1))
+  self.assertEqual({r['stake'] for r in self.s.db.query('SELECT stake FROM custom_orders WHERE strategy=?',(key,))},{10000})

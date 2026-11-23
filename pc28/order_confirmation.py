@@ -12,8 +12,37 @@ CREATE TABLE IF NOT EXISTS robot_execution(
  outbox_id INTEGER PRIMARY KEY, status TEXT NOT NULL DEFAULT 'awaiting',
  detail TEXT NOT NULL DEFAULT '', updated TEXT NOT NULL, deadline INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS robot_execution_due ON robot_execution(status,deadline);
+CREATE TABLE IF NOT EXISTS robot_submission_receipts(outbox_id INTEGER PRIMARY KEY,received_at TEXT NOT NULL);
 """
 UI_SUBMISSION_ATTEMPTED = 'UI 自动化发送结果不确定，禁止自动重试：已尝试提交消息，结果不确定，请人工核对'
+
+
+def reconcile_submission_receipts(c, outbox_id=None):
+    """A verified timely submission callback proves receiver acceptance,
+    even when its HTTP response failed. It is NOT a betting execution receipt.
+    Only receive() can create submitted state; keep unknown/timeouts unresolved.
+    """
+    c.execute("""INSERT OR IGNORE INTO robot_submission_receipts SELECT outbox_id,updated
+        FROM robot_execution WHERE status='submitted'""")
+    rows=c.execute("""SELECT o.id,o.sent_at,r.received_at,b.request FROM robot_execution e
+        JOIN robot_submission_receipts r ON r.outbox_id=e.outbox_id
+        JOIN robot_outbox o ON o.id=e.outbox_id JOIN robot_batch_items i ON i.outbox_id=o.id
+        JOIN robot_batches b ON b.id=i.batch_id WHERE e.status IN ('submitted','unconfirmed')
+        AND o.status='failed' AND o.last_status=400 AND o.is_test=0"""+
+        (' AND o.id=?' if outbox_id is not None else ''),(() if outbox_id is None else (outbox_id,))).fetchall()
+    changed=0
+    for row in rows:
+        try:
+            wire=json.loads(row['request']);expires=wire['expires_at']
+            sent=datetime.fromisoformat(row['sent_at']).timestamp()
+            received=datetime.fromisoformat(row['received_at']).timestamp()
+            if not sent<=received<expires:continue
+        except (TypeError,ValueError,KeyError):continue
+        changed+=c.execute("""UPDATE robot_outbox SET status='sent',accepted_at=?,
+            last_error='HTTP 400后收到匹配批次提交回调；按本站开奖记账，不代表外部投注回执'
+            WHERE id=? AND status='failed'""",(row['received_at'],row['id'])).rowcount
+        c.execute("UPDATE robot_execution SET status='submitted' WHERE outbox_id=? AND status='unconfirmed'",(row['id'],))
+    return changed
 
 
 def attach(c, wire, rows, required, callback_url):
@@ -158,11 +187,14 @@ def _apply(c, service, order, wire, status, detail, body):
             alert(c,order,status,detail)
             return {'ok':True,'valid':False}
         if status=='unknown' and detail.strip()==UI_SUBMISSION_ATTEMPTED:
+            c.execute('INSERT OR IGNORE INTO robot_submission_receipts VALUES(?,?)',(order['id'],utcnow()))
             if order['execution_status']=='submitted':
+                reconcile_submission_receipts(c,order['id'])
                 return {'ok':True,'duplicate':True}
             if order['execution_status'] in ('awaiting','unconfirmed'):
                 c.execute("UPDATE robot_execution SET status='submitted',detail='',updated=? WHERE outbox_id=?",
                           (utcnow(),order['id']))
+                reconcile_submission_receipts(c,order['id'])
                 return {'ok':True}
         if order['execution_status']==status:
             return {'ok':True,'duplicate':True}
@@ -192,10 +224,15 @@ def _apply(c, service, order, wire, status, detail, body):
 
 
 def expire(c, now=None):
+    reconcile_submission_receipts(c)
     now=int(time.time()) if now is None else now
-    for row in c.execute("""SELECT o.* FROM robot_execution e JOIN robot_outbox o ON o.id=e.outbox_id
-        WHERE e.status='awaiting' AND e.deadline<=? LIMIT 100""",(now,)).fetchall():
-        detail='未收到执行终态，订单不计入有效记录，待核对'
+    for row in c.execute("""SELECT o.*,e.status execution_status FROM robot_execution e JOIN robot_outbox o ON o.id=e.outbox_id
+        WHERE e.status IN ('awaiting','submitted') AND e.deadline<=?
+        AND NOT (e.status='submitted' AND o.status='sent' AND EXISTS(
+          SELECT 1 FROM draws d WHERE d.id=o.target_draw
+          AND d.verification IN ('full_keno','crosschecked_abc') AND julianday(d.draw_utc)<=julianday('now')
+          AND NOT EXISTS(SELECT 1 FROM conflicts x WHERE x.draw_id=d.id AND x.resolved=0))) LIMIT 100""",(now,)).fetchall():
+        detail=('已尝试提交但未收到执行终态，禁止重复发送，待核对' if row['execution_status']=='submitted' else '未收到执行终态，订单不计入有效记录，待核对')
         c.execute("UPDATE robot_execution SET status='unconfirmed',detail=?,updated=? WHERE outbox_id=?",
                   (detail,utcnow(),row['id']))
         alert(c,row,'回调超时',detail)

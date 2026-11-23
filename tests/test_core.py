@@ -69,8 +69,8 @@ class CoreTests(unittest.TestCase):
   self.db.import_records([{'id':100+i,'time':self.now.replace(tzinfo=None).isoformat(),'numbers':list(range(1,21))} for i in range(30)],'file');r=tick(self.db,self.cfg,self.now);self.assertIn('时区',r['reason'])
  def test_gap_prevents_order(self):
   self.seed();self.add(132);r=tick(self.db,self.cfg,self.now);self.assertEqual(r['action'],'skip')
- def test_pending_gap_blocks_next_order(self):
-  self.seed();tick(self.db,self.cfg,self.now);self.add(131);r=tick(self.db,self.cfg,self.now);self.assertIn('未结算',r['reason']);self.assertEqual(len(self.db.query('SELECT * FROM orders')),1)
+ def test_pending_gap_defers_order_but_preserves_window_requirement(self):
+  self.seed();tick(self.db,self.cfg,self.now);self.add(131);r=tick(self.db,self.cfg,self.now);self.assertIn('窗口',r['reason']);self.assertEqual(self.db.query('SELECT target_draw,status FROM orders'),[{'target_draw':130,'status':'awaiting_result'}])
  def test_balance_limit(self):
   self.seed();self.cfg['simulation']['initial_balance']=50;r=tick(self.db,self.cfg,self.now);self.assertIn('余额',r['reason'])
  def test_special_odds(self):

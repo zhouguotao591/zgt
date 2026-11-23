@@ -4,17 +4,17 @@ from collections import Counter
 from . import win_pause,maintenance,amount_bands
 from datetime import datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
-from .model import money,utcnow,settlement,rounded_ratio,stake_limit_reason
+from .model import money,utcnow,settlement,rounded_ratio,stake_limit_reason,DIRECTION_AXES,direction_hits
 from .trend_strategy import risk_reason,signal,progress
 from .strategy_capital import sync_capital
 from .algorithm_hall import BY_ID,VERIFIED,predict,ranked_algorithms,RollingRanking,ALGORITHMS_PER_AXIS
 PREVIOUS_AMOUNT_KINDS=('previous','algorithm','algorithm_rank')
 KINDS=('hourly','majority','previous','single','algorithm','algorithm_rank');BJ=ZoneInfo('Asia/Shanghai')
 def defaults(cfg,kind,axis='size'):
- value={'strategy_type':kind,'axis':axis,'direction':None,'win_limit':5 if kind=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0,'observe_hours':2,'hour_difference':5,'follow_hours':2,'lookback':20,'base_cents':50000,'loss_increment_cents':10000,'multiplier_hundredths':200,'stake_mode':'fixed' if kind=='hourly' else 'additive','max_losses':3,'initial_balance':cfg['simulation']['initial_balance'],**{k:cfg['simulation'][k] for k in ('daily_loss_limit','max_drawdown','max_stake')}}
+ value={'strategy_type':kind,'axis':axis,'direction':None,'win_limit':5 if kind=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0,'observe_hours':2,'hour_difference':5,'follow_hours':2,'lookback':20,'base_cents':10000,'loss_increment_cents':0,'multiplier_hundredths':100,'stake_mode':'fixed','max_losses':3,'initial_balance':cfg['simulation']['initial_balance'],**{k:cfg['simulation'][k] for k in ('daily_loss_limit','max_drawdown','max_stake')}}
  if kind=='single':value.update(direction='单',axis='parity',stake_mode='fixed',win_limit=0,base_cents=cfg['simulation']['fixed']['base_cents'])
- if kind=='single':value.update(stake_mode='adjust',win_decrement_cents=10000,stake_floor='market',max_increase_steps=0,max_decrease_steps=0)
- if kind in PREVIOUS_AMOUNT_KINDS:value.update(win_decrement_cents=10000,stake_floor='market',max_stake=20000,win_limit=0,max_increase_steps=0,max_decrease_steps=0)
+ if kind=='single':value.update(stake_mode='adjust',win_decrement_cents=0,stake_floor='market',max_increase_steps=0,max_decrease_steps=0)
+ if kind in PREVIOUS_AMOUNT_KINDS:value.update(win_decrement_cents=0,stake_floor='market',max_stake=20000,win_limit=0,max_increase_steps=0,max_decrease_steps=0)
  if kind in (*PREVIOUS_AMOUNT_KINDS,'single'):value.update(amount_bands.ZERO)
  if kind=='algorithm_rank':value.update(rank_position=1,rank_window=20)
  if kind=='algorithm':value.update(algorithm_follow_draws=20,algorithm_difference_limit=0,algorithm_cooldown_rounds=0)
@@ -101,12 +101,10 @@ def validate(cfg,value):
   value={**amount_bands.ZERO,**value};amount_bands.validate(value)
  expected=set(defaults(cfg,value.get('strategy_type','hourly')))
  if set(value)!=expected:raise ValueError('跟随策略参数不完整或包含未知字段')
- if value.get('direction') is not None and value.get('direction') not in ('单','双','大','小'):raise ValueError('开单方向须为单、双、大、小之一')
- if value.get('direction') is not None and value.get('axis')!=('size' if value['direction'] in ('大','小') else 'parity'):raise ValueError('开单方向与判断维度不一致')
- if value.get('strategy_type')=='single':
-  if value.get('direction') not in ('单','双','大','小'):raise ValueError('单边策略只能选择单、双、大、小中的一个方向')
-  if value.get('axis')!=('size' if value['direction'] in ('大','小') else 'parity'):raise ValueError('开单方向与判断维度不一致')
- if value['strategy_type'] not in KINDS or value['axis'] not in ('size','parity'):raise ValueError('策略类型或维度无效')
+ direction=value['direction'];axis=value['axis'];single=value['strategy_type']=='single'
+ if value['strategy_type'] not in KINDS or axis not in (('size','parity','combo') if single else ('size','parity')):raise ValueError('策略类型或维度无效')
+ if single or direction is not None:
+  if not isinstance(direction,str) or DIRECTION_AXES.get(direction)!=axis:raise ValueError('请选择与策略维度匹配的开单方向')
  if value['strategy_type']=='algorithm_rank':
   if value['direction'] is not None:raise ValueError('算法排名跟随只选择大小或单双类型')
   for field,maximum in [('rank_position',ALGORITHMS_PER_AXIS),('rank_window',10000)]:
@@ -161,7 +159,7 @@ def next_stake(settings,losses):
  for _ in range(losses):base=rounded_ratio(base,settings['multiplier_hundredths'])
  return base
 def settle_one(c,o,r,a):
- plan=json.loads(o['strategy_json']);settings=plan['settings'];state=json.loads(a['state']);hit=r[settings['axis']]==o['direction'];paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit'];losses,reset=progress(state.get('losses',0),hit,settings['max_losses'])
+ plan=json.loads(o['strategy_json']);settings=plan['settings'];state=json.loads(a['state']);hit=direction_hits(o['direction'],r['size'],r['parity']);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit'];losses,reset=progress(state.get('losses',0),hit,settings['max_losses'])
  if adjusts_amount(settings):
   losses=0 if paid['outcome']=='win' else state.get('losses',0)+int(paid['outcome']=='loss')
   state['next_stake']=previous_amount(o['stake'],paid['outcome'],settings,state)
@@ -246,7 +244,10 @@ def tick_one(c,a,history,cfg,now):
     if direction:state.update(active=True,direction=direction,follow_start=hour.isoformat(),follow_end=(hour+timedelta(hours=settings['follow_hours'])).isoformat(),cycle=state.get('cycle',0)+1,losses=0,attempt=0,evidence=evidence)
     else:reason=why
  if direction and settings.get('direction') and direction!=settings['direction']:reason=reason or '入场方向不符合指定的'+settings['direction']+'，本期不下单'
- stake=state.get('next_stake',settings['base_cents']) if adjusts_amount(settings) else next_stake(settings,state.get('losses',0));day=now.astimezone(timezone.utc).date().isoformat();daily=c.execute("SELECT COALESCE(SUM(pnl),0) FROM custom_orders WHERE strategy=? AND status='settled' AND substr(settled,1,10)=?",(key,day)).fetchone()[0]
+ stake=state.get('next_stake',settings['base_cents']) if adjusts_amount(settings) else next_stake(settings,state.get('losses',0))
+ if adjusts_amount(settings) and settings.get('loss_increment_cents',0)==0 and settings.get('win_decrement_cents',0)==0 and not any(settings.get(k,0) for k in amount_bands.FIELDS):
+  stake=settings['base_cents']
+ day=now.astimezone(timezone.utc).date().isoformat();daily=c.execute("SELECT COALESCE(SUM(pnl),0) FROM custom_orders WHERE strategy=? AND status='settled' AND substr(settled,1,10)=?",(key,day)).fetchone()[0]
  reason=reason or risk_reason(a['balance'],a['peak'],stake,daily,settings,cfg['odds'])
  if reason:
   c.execute('UPDATE custom_strategies SET state=? WHERE id=?',(json.dumps(state,ensure_ascii=False),key))

@@ -291,6 +291,7 @@ class RobotSignals(Accounts,Platforms):
     orders=[dict(r) for r in c.execute('SELECT * FROM '+table+' WHERE id>? ORDER BY id LIMIT 500',(cursor,))]
     for o in orders:
      c.execute('UPDATE robot_cursors SET last_id=? WHERE engine=?',(o['id'],engine))
+     if o['status']=='awaiting_result':continue
      if engine=='custom' and c.execute("SELECT 1 FROM gap_order_tags WHERE engine='custom' AND order_id=?",(o['id'],)).fetchone():continue
      try:when=int(datetime.fromisoformat(o['created']).timestamp())
      except (TypeError,ValueError):continue
@@ -308,6 +309,11 @@ class RobotSignals(Accounts,Platforms):
        mapping=None
        if recipient['id']:
         mapping=c.execute('SELECT * FROM robot_binding_map WHERE binding_id=?',(recipient['id'],)).fetchone()
+       if mapping and getattr(self.service,'trend_risk',None):
+        from .trend_risk import admit as trend_admit
+        trend_reason=trend_admit(c,mapping['bot_id'],context['strategy_id'],o['target_draw'],'capture')
+        if trend_reason:
+         c.execute('INSERT OR IGNORE INTO robot_capture_skips VALUES(?,?,?,?,?,?,?,?)',(engine,o['id'],mapping['account_id'],mapping['bot_id'],context['strategy_id'],o['target_draw'],trend_reason,utcnow()));continue
        subscription=None;snapshot=None
        if engine=='signal':
         subscription=c.execute('SELECT * FROM robot_subscriptions WHERE bot_id=? AND strategy_id=? AND enabled=1',(mapping['bot_id'],context['strategy_id'])).fetchone() if mapping else None
@@ -429,6 +435,11 @@ class RobotSignals(Accounts,Platforms):
      except ValueError as error:
       c.execute("UPDATE robot_outbox SET status='cancelled',last_error=?,finished=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",
                 (str(error),utcnow(),batch_id));return True
+    if not row['is_test'] and getattr(self.service,'trend_risk',None):
+     from .trend_risk import admit as trend_admit
+     trend_reason=next((reason for member in members if member.get('bot_id') is not None and (reason:=trend_admit(c,member['bot_id'],member['strategy_id'],member['target_draw'],'send'))),None)
+     if trend_reason:
+      c.execute("UPDATE robot_outbox SET status='cancelled',last_error=?,finished=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",(trend_reason+'；合并消息整体取消',utcnow(),batch_id));return True
     from .member_orders import admit as member_admit
     funds_reason=member_admit(c,members)
     if funds_reason:
@@ -467,6 +478,7 @@ class RobotSignals(Accounts,Platforms):
   with self.service.lock,self.db.tx() as c:
    finished=utcnow()
    c.execute('UPDATE robot_outbox SET status=?,last_status=?,last_error=?,next_attempt=?,finished=?,accepted_at=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)',(state,status,'' if success else error,int(time.time())+delay,finished if state in ('sent','failed','expired') else None,finished if success else None,batch_id))
+   order_confirmation.reconcile_submission_receipts(c)
    if success:
     from .member_orders import import_signal,settle
     for member in c.execute('SELECT o.* FROM robot_outbox o JOIN robot_batch_items i ON i.outbox_id=o.id WHERE i.batch_id=? AND NOT EXISTS(SELECT 1 FROM robot_execution e WHERE e.outbox_id=o.id) ORDER BY o.id',(batch_id,)).fetchall():import_signal(c,self.service,member,batch_id,sent_at,finished)
@@ -478,6 +490,7 @@ class RobotSignals(Accounts,Platforms):
    if not success and state in ('failed','expired') and not row['is_test']:
     for member in members:
      if uncertain_rejection:
+      if c.execute("SELECT 1 FROM robot_outbox WHERE id=? AND status='sent' AND accepted_at IS NOT NULL",(member['id'],)).fetchone():continue
       changed=c.execute("UPDATE robot_execution SET status='unconfirmed',detail=?,updated=? WHERE outbox_id=? AND status='awaiting'",
                         ('接收端返回 HTTP 400，是否已创建任务尚待核对',utcnow(),member['id'])).rowcount
       if changed or not c.execute('SELECT 1 FROM robot_execution WHERE outbox_id=?',(member['id'],)).fetchone():
@@ -492,6 +505,10 @@ class RobotSignals(Accounts,Platforms):
   with self.db.tx() as c:
    row=c.execute("SELECT * FROM robot_outbox WHERE id=? AND status IN ('failed','retry') AND NOT EXISTS (SELECT 1 FROM robot_hidden_records h WHERE h.outbox_id=robot_outbox.id)",(key,)).fetchone()
    if not row:raise ValueError('该记录不能重试')
+   if not row['is_test']:
+    batch=c.execute('SELECT batch_id FROM robot_batch_items WHERE outbox_id=?',(key,)).fetchone()
+    selector='o.id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)' if batch else 'o.id=?'
+    if c.execute("SELECT 1 FROM robot_outbox o JOIN robot_execution e ON e.outbox_id=o.id WHERE "+selector+" AND e.status IN ('submitted','unconfirmed') LIMIT 1",(batch[0] if batch else key,)).fetchone():raise ValueError('执行状态待核对，禁止重复发送；请先核对接收端任务')
    if time.time()-row['event_time']>cfg['max_age_seconds']:raise ValueError('信号已过期，不再补发')
    if not row['is_test']:
     if not cfg['enabled']:raise ValueError('请先启用机器人推送')
@@ -512,9 +529,9 @@ class RobotSignals(Accounts,Platforms):
   if scope is not None:
    filters.append("member_user_id IN (SELECT member_id FROM web_member_access WHERE admin_id=?)");args.append(scope)
   where=' AND '.join(filters);args=tuple(args)
-  source="""(SELECT o.*,i.batch_id,COALESCE(i.batch_id,CASE WHEN o.is_test=1 THEN 'test:'||o.id ELSE 'queued:'||o.recipient_id||':'||o.target_draw||':'||o.status END) message_group FROM robot_outbox o LEFT JOIN robot_batch_items i ON i.outbox_id=o.id WHERE NOT EXISTS (SELECT 1 FROM robot_hidden_records h WHERE h.outbox_id=o.id) ORDER BY o.id)"""
+  source="""(SELECT o.*,i.batch_id,CASE WHEN h.outbox_id IS NOT NULL AND """+robot_risk.UNCERTAIN_SQL+""" THEN 1 ELSE 0 END needs_reconciliation,COALESCE(i.batch_id,CASE WHEN o.is_test=1 THEN 'test:'||o.id ELSE 'queued:'||o.recipient_id||':'||o.target_draw||':'||o.status END) message_group FROM robot_outbox o LEFT JOIN robot_batch_items i ON i.outbox_id=o.id LEFT JOIN robot_execution e ON e.outbox_id=o.id LEFT JOIN robot_risk_holds h ON h.outbox_id=o.id WHERE NOT EXISTS (SELECT 1 FROM robot_hidden_records h WHERE h.outbox_id=o.id) ORDER BY o.id)"""
   total=self.db.query('SELECT COUNT(*) n FROM (SELECT message_group FROM '+source+' WHERE '+where+' GROUP BY message_group)',args)[0]['n'];pages=max(1,(total+size-1)//size);page=min(page,pages)
-  rows=self.db.query("SELECT MAX(id) id,MAX(event_id) event_id,MAX(name) name,GROUP_CONCAT(DISTINCT strategy_name) strategy_name,MAX(target_draw) target_draw,MIN(created) created,GROUP_CONCAT(message,' ') message,MAX(status) status,MAX(attempts) attempts,MAX(last_status) last_status,MAX(last_error) last_error,MAX(finished) finished,MAX(is_test) is_test,MAX(recipient_id) recipient_id,MAX(recipient_name) recipient_name,MAX(platform_id) platform_id,MAX(follow_account_id) follow_account_id,MAX(bot_id) bot_id,MAX(batch_id) batch_id,MIN(created) cached_at,MAX(scheduled_at) scheduled_at,MAX(sent_at) sent_at,MAX(accepted_at) accepted_at,COUNT(*) order_count FROM "+source+' WHERE '+where+' GROUP BY message_group ORDER BY MAX(id) DESC LIMIT ? OFFSET ?',(*args,size,(page-1)*size))
+  rows=self.db.query("SELECT MAX(id) id,MAX(event_id) event_id,MAX(name) name,GROUP_CONCAT(DISTINCT strategy_name) strategy_name,MAX(target_draw) target_draw,MIN(created) created,GROUP_CONCAT(message,' ') message,MAX(status) status,MAX(attempts) attempts,MAX(last_status) last_status,MAX(last_error) last_error,MAX(finished) finished,MAX(is_test) is_test,MAX(recipient_id) recipient_id,MAX(recipient_name) recipient_name,MAX(platform_id) platform_id,MAX(follow_account_id) follow_account_id,MAX(bot_id) bot_id,MAX(batch_id) batch_id,MIN(created) cached_at,MAX(scheduled_at) scheduled_at,MAX(sent_at) sent_at,MAX(accepted_at) accepted_at,MAX(needs_reconciliation) needs_reconciliation,COUNT(*) order_count FROM "+source+' WHERE '+where+' GROUP BY message_group ORDER BY MAX(id) DESC LIMIT ? OFFSET ?',(*args,size,(page-1)*size))
   names={p['id']:p['name'] for p in self.platforms()}
   for r in rows:
    r['platform_name']=names.get(r['platform_id'],'未知平台');a=self.db.query('SELECT name,external_account_id FROM robot_accounts WHERE id=?',(r['follow_account_id'],));b=self.db.query('SELECT name,external_bot_key FROM robot_bots WHERE id=?',(r['bot_id'],));r.update(account_name=a[0]['name'] if a else '历史账号',external_account_id=a[0]['external_account_id'] if a else None,bot_name=b[0]['name'] if b else '历史机器人',external_bot_key=b[0]['external_bot_key'] if b else None)

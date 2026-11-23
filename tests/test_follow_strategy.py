@@ -113,4 +113,15 @@ class FollowTests(unittest.TestCase):
  def test_edited_follow_preserves_balance_and_catalog_type(self):
   key,rule=self.create('majority');changed={**rule,'lookback':50};save(self.s,{'id':key,'name':'edited','settings':changed});row=next(r for r in catalog(self.s.db,self.s.cfg)['strategies'] if r['id']==key)
   self.assertEqual(row['editor_type'],'majority');self.assertEqual(row['settings']['lookback'],50);self.assertEqual(row['stats']['balance'],100000)
+
+ def test_majority_axis_selection_enables_and_follows_both_axes(self):
+  size,_=self.create('majority',axis='size',lookback=10,win_limit=0)
+  parity,_=self.create('majority',axis='parity',lookback=10,win_limit=0)
+  self.enable(size);self.enable(parity)
+  tick(self.s.db,self.s.cfg,self.now)
+  orders=self.s.db.query('SELECT strategy,direction,stake FROM custom_orders')
+  self.assertEqual(len(orders),2)
+  self.assertEqual({o['direction'] for o in orders},{'大','单'})
+  self.assertEqual({o['stake'] for o in orders},{10000})
+
 if __name__=='__main__':unittest.main()

@@ -1,12 +1,12 @@
 import json, os
 from pathlib import Path
-from .model import SCREENSHOT_ODDS
+from .model import SCREENSHOT_ODDS,COMBO_ODDS
 DEFAULT={
  'trend_simulation':{'enabled_axes':[],'initial_balance_per_strategy':100000},
  'host':'127.0.0.1','port':8028,'database':'data/pc28.sqlite3',
- 'collector':{'maintenance_guard_enabled':True,'enabled':True,'allow_crosschecked_results':True,'interval_seconds':30,'timeout_seconds':15,'work_fallback_enabled':True,'work_fallback_url':'https://www.pc28.work/bff/market/latest','work_fallback_proxy':'','fallback_enabled':True,'fallback_url':'https://pc28.world/api/v1/draws/latest','fallback_timezone':'Asia/Shanghai','fallback_proxy':'','latest_url':'https://www.playnow.com/services2/keno/draw/latest/100','archive_url':'https://www.playnow.com/resources/documents/downloadable-numbers/KenoCurrentYear.zip','archive_interval_hours':24,'proxy':'','source_timezone':None,'number_order':'require_ascending','max_response_mb':64,'max_age_seconds':600,'field_map':{'records':'','id':'drawNumber','time':'drawDate','numbers':'numbers'}},
- 'simulation':{'win_limit':0,'pause_draws':20,'win_loss_difference_limit':0,'round_restart':'condition_reset','enabled':False,'mode':'fixed','initial_balance':100000,'daily_loss_limit':3000,'max_drawdown':15000,'max_stake':400,'switch_cooldown_draws':3,'max_received_delay_seconds':60,'max_decision_age_seconds':120,'fixed':{'direction':'单','threshold':6,'max_bets':8,'lookback':30,'base_cents':10000,'multiplier_hundredths':200,'max_losses':3,'kind':'imbalance','run_length':0}},
- 'odds':SCREENSHOT_ODDS.copy(),
+ 'collector':{'maintenance_guard_enabled':True,'enabled':True,'allow_crosschecked_results':True,'interval_seconds':10,'timeout_seconds':15,'work_fallback_enabled':True,'work_fallback_url':'https://www.pc28.work/bff/market/latest','work_fallback_proxy':'','fallback_enabled':True,'fallback_url':'https://pc28.world/api/v1/draws/latest','fallback_timezone':'Asia/Shanghai','fallback_proxy':'','latest_url':'https://www.playnow.com/services2/keno/draw/latest/100','archive_url':'https://www.playnow.com/resources/documents/downloadable-numbers/KenoCurrentYear.zip','archive_interval_hours':24,'proxy':'','source_timezone':None,'number_order':'require_ascending','max_response_mb':64,'max_age_seconds':600,'field_map':{'records':'','id':'drawNumber','time':'drawDate','numbers':'numbers'}},
+ 'simulation':{'win_limit':0,'pause_draws':20,'win_loss_difference_limit':0,'round_restart':'condition_reset','enabled':False,'mode':'fixed','initial_balance':100000,'daily_loss_limit':3000,'max_drawdown':15000,'max_stake':400,'switch_cooldown_draws':3,'max_received_delay_seconds':60,'max_decision_age_seconds':120,'fixed':{'direction':'单','threshold':6,'max_bets':8,'lookback':30,'base_cents':10000,'multiplier_hundredths':100,'max_losses':3,'kind':'imbalance','run_length':0}},
+ 'odds':{**SCREENSHOT_ODDS,'combo_thousandths':COMBO_ODDS.copy()},
  'research':{'train_months':3,'validation_months':1,'thresholds':[2,4,6,8,10,12,14,16],'max_bets':[3,5,8,13,21],'lookback':30,'include_reversal':True,'run_lengths':[3,5,8],'min_train_bets':1000,'min_validation_bets':300,'max_validation_drawdown':15000,'minimum_validation_roi':0.0,'top_train_candidates_per_direction':3,'require_flat_profit':True},
  'monthly_auto_select':True
 }
@@ -14,7 +14,7 @@ DEFAULT={
 def load(root):
     p=Path(root)/'config.json'
     if not p.exists():p.write_text(json.dumps(DEFAULT,ensure_ascii=False,indent=2),encoding='utf8')
-    cfg=json.loads(p.read_text(encoding='utf-8-sig'));cfg.setdefault('trend_simulation',{'enabled_axes':[],'initial_balance_per_strategy':cfg['simulation']['initial_balance']});validate(cfg);return cfg
+    cfg=json.loads(p.read_text(encoding='utf-8-sig'));cfg.setdefault('trend_simulation',{'enabled_axes':[],'initial_balance_per_strategy':cfg['simulation']['initial_balance']});cfg['odds'].setdefault('combo_thousandths',COMBO_ODDS.copy());validate(cfg);return cfg
 
 def validate(c):
     from .model import Strategy
@@ -41,7 +41,7 @@ def validate(c):
     if not 1024<=int(c['port'])<=65535:raise ValueError('端口不合法')
     if c['simulation'].get('round_restart','immediate') not in ('condition_reset','immediate'):raise ValueError('轮结束恢复方式无效')
     if c['simulation']['mode'] not in ('fixed','monthly','adaptive'):raise ValueError('模拟模式错误')
-    if not 15<=int(c['collector']['interval_seconds'])<=86400:raise ValueError('采集间隔至少15秒')
+    if not 10<=int(c['collector']['interval_seconds'])<=86400:raise ValueError('采集间隔至少10秒')
     if not 1<=int(c['collector']['timeout_seconds'])<=60:raise ValueError('网络超时范围1—60秒')
     if not 1<=int(c['collector']['max_response_mb'])<=128:raise ValueError('响应大小上限1—128MB')
     if c['collector']['number_order'] not in ('require_ascending','preserve','ascending'):raise ValueError('号码顺序配置错误')
@@ -50,6 +50,8 @@ def validate(c):
         number=float(c['simulation'][k])
         if not math.isfinite(number) or number<0 or (k in ('initial_balance','max_stake') and number==0):raise ValueError('资金参数无效；单日亏损与最大回撤可设0表示不限')
     odds=c['odds']
+    combo=odds.get('combo_thousandths',COMBO_ODDS)
+    if not isinstance(combo,dict) or combo.keys()!=COMBO_ODDS.keys() or any(type(v) is not int or not 1000<=v<=10000 for v in combo.values()):raise ValueError('组合赔率按千分之一倍填写')
     for key in ('normal','special_size','special_parity','high_stake_factor'):
         if key in odds and (type(odds[key]) is not int or not 100<=odds[key]<=1000):raise ValueError('赔率按百分之一倍填写')
     for key in ('high_stake_threshold_cents','min_stake_cents','max_stake_cents','max_return_per_draw_cents'):
