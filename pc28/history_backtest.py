@@ -4,7 +4,7 @@ from collections import Counter
 from datetime import datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
 from dataclasses import asdict
-from .model import Strategy,money,settlement,rounded_ratio,utcnow,direction_hits
+from .model import Strategy,money,previous_direction,settlement,rounded_ratio,utcnow,direction_hits
 from .trend_strategy import settings as trend_settings,signal,progress,risk_reason,summary
 from .follow_strategy import hourly_signal,next_stake,previous_amount,adjusts_amount,algorithm_signal,settle_algorithm_round,rank_signal
 from .algorithm_hall import VERIFIED,RollingRanking
@@ -174,7 +174,7 @@ def replay(rows,snapshot,on_progress=None):
   elif kind=='single':
    direction=cfg['direction'];stake=state.get('next_stake',cfg['base_cents']) if adjusts_amount(cfg) else next_stake(cfg,state['losses']);step=state['losses']+1
   elif kind=='previous':
-   direction=prev[cfg['axis']];stake=state.get('next_stake',cfg['base_cents']);step=state['attempt']+1
+   direction=previous_direction(prev,cfg['axis']);stake=state.get('next_stake',cfg['base_cents']);step=state['attempt']+1
   elif kind in ('algorithm','algorithm_rank'):
    if r.get('verification') not in VERIFIED:skips['目标开奖尚未核验']+=1;continue
    algorithm_state=state.copy()
@@ -205,7 +205,7 @@ def replay(rows,snapshot,on_progress=None):
    state.update(active=True,strategy=asdict(s),cycle=state['cycle']+1,attempt=0,losses=0,stake=stake,waiting_rearm=False)
    if s.key!=state.get('last_key'):state.update(last_key=s.key,last_switch=target)
   if kind in ('majority','previous','single') and not state['cycle']:state['cycle']=1
-  cycle=state['cycle'];hit=direction_hits(direction,r['size'],r['parity']);paid=settlement(stake,direction,r['total'],hit,odds);balance+=paid['pnl'];daily+=paid['pnl'];peak=max(peak,balance);equity+=paid['pnl'];last_direction=direction
+  cycle=state['cycle'];hit=direction_hits(direction,r['size'],r['parity'],r);paid=settlement(stake,direction,r['total'],hit,odds);balance+=paid['pnl'];daily+=paid['pnl'];peak=max(peak,balance);equity+=paid['pnl'];last_direction=direction
   state.update(last_settled_draw=target,attempt=step)
   win_pause.settled(state,paid['outcome'],target,cfg.get('win_limit',5 if kind=='majority' else 0),cfg.get('pause_draws',20), cfg.get('win_loss_difference_limit',0));win_stop=(state.get('difference_paused',False) or state.get('pause_until',0)>target)
   if kind=='reversal':

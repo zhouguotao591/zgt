@@ -15,6 +15,9 @@ def page_rows(db,table,columns,q,where='1',args=()):
 
 def get(service,path,q,user=None):
  db=service.db;auth=service.auth;scope=member_scope(user)
+ if path=='strategy-phases':
+  from .strategy_phases import listing
+  return listing(service,q.get('interval','1h'))
  if path=='trend-risk':return service.trend_risk.listing(user,q)
  if path=='trend-risk-logs':return service.trend_risk.logs(user,q)
  if path=='money-plans':

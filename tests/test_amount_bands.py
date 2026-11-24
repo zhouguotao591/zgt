@@ -52,7 +52,11 @@ class LiveReplayTests(unittest.TestCase):
  def test_both_bands_live_settlement_matches_replay(self):
   from datetime import timedelta
   from pc28.history_backtest import prepare,source_window,replay
-  key,_=self.create(base_cents=600,win_decrement_cents=100,loss_increment_cents=100,low_enter_cents=500,low_exit_cents=600,low_loss_increment_cents=200,low_win_decrement_cents=100,high_enter_cents=900,high_exit_cents=700,high_loss_increment_cents=100,high_win_decrement_cents=200)
+  # Legacy stored snapshots remain replayable; new band rules belong to money plans.
+  import json
+  key,settings=self.create(base_cents=600,win_decrement_cents=100,loss_increment_cents=100)
+  settings.update(low_enter_cents=500,low_exit_cents=600,low_loss_increment_cents=200,low_win_decrement_cents=100,high_enter_cents=900,high_exit_cents=700,high_loss_increment_cents=100,high_win_decrement_cents=200)
+  with self.s.db.tx() as c:c.execute('UPDATE custom_strategies SET settings=? WHERE id=?',(json.dumps(settings),key))
   sequence=['大']*5+['小','大']*6+['大']*8
   for i,side in enumerate(sequence):self.step(self.draw(i,side)+timedelta(seconds=1))
   p=prepare(self.s,{'strategy_id':key});rows,_=source_window(self.s.db.rows(),set(),p['as_of']);_,expected=replay(rows,p['snapshot']);actual=self.s.db.query("SELECT target_draw,stake,pnl FROM custom_orders WHERE strategy=? AND status='settled' ORDER BY target_draw",(key,))

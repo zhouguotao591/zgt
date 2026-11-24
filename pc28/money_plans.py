@@ -1,6 +1,7 @@
 """Versioned sizing policies. Progress belongs to a robot subscription, not a signal."""
 import json
 from .model import utcnow, rounded_ratio
+from . import amount_bands
 
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS money_plans(id INTEGER PRIMARY KEY,name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,version INTEGER NOT NULL DEFAULT 1,settings TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL);
@@ -18,6 +19,7 @@ def initialize(c):
  c.execute('CREATE INDEX IF NOT EXISTS robot_outbox_subscription ON robot_outbox(subscription_id,id)')
 
 DEFAULTS=dict(mode='fixed',base_cents=10000,loss_increment_cents=10000,win_decrement_cents=10000,multiplier_hundredths=200,max_increase_steps=0,max_decrease_steps=0,min_cents=100,max_cents=2000000,stake_floor='market')
+DEFAULTS.update(amount_bands.ZERO)
 
 def validate(value):
  if not isinstance(value,dict) or set(value)-set(DEFAULTS)-{'reset_basis'}:raise ValueError('金额方案参数无效')
@@ -31,6 +33,9 @@ def validate(value):
  if type(s['multiplier_hundredths'])!=int or not 100<=s['multiplier_hundredths']<=10000:raise ValueError('亏后倍数须为1—100')
  for k in ('max_increase_steps','max_decrease_steps'):
   if type(s[k])!=int or not 0<=s[k]<=100000:raise ValueError('累计次数须为0—100000，0不限')
+ amount_bands.validate(s)
+ if any(s[k] for k in amount_bands.FIELDS) and s['mode']!='adjust':raise ValueError('特殊金额区间仅适用于赢减亏加模式')
+ if any(s[k]%100 or s[k]>2000000 for k in amount_bands.FIELDS):raise ValueError('区间金额须为整数U，最高20000U')
  if s['stake_floor'] not in ('market','base'):raise ValueError('最低金额口径无效')
  return s
 
@@ -79,21 +84,25 @@ def advance(state,s,order):
  if mode=='fixed':next_stake=s['base_cents']
  elif mode in ('additive','multiply'):
   next_stake=s['base_cents'] if win else stake+s['loss_increment_cents'] if mode=='additive' else rounded_ratio(stake,s['multiplier_hundredths'])
- else:next_stake=stake-s['win_decrement_cents'] if win else stake+s['loss_increment_cents']
+ else:
+  loss_increment,win_decrement=amount_bands.adjustments(stake,s,state)
+  next_stake=stake-win_decrement if win else stake+loss_increment
  if mode=='adjust' and s.get('reset_basis')=='amount':
   upper=s['base_cents']+s['max_increase_steps']*s['loss_increment_cents']
   lower=s['base_cents']-s['max_decrease_steps']*s['win_decrement_cents']
   reached_upper=s['max_increase_steps']>0 and s['loss_increment_cents']>0 and stake>=upper
   reached_lower=s['max_decrease_steps']>0 and s['win_decrement_cents']>0 and stake<=lower
-  if reached_upper or reached_lower:next_stake=s['base_cents']
+  if reached_upper or reached_lower:
+   next_stake=s['base_cents'];state.pop('amount_band',None)
   difference=next_stake-s['base_cents']
   state.update(increases=max(0,difference)//s['loss_increment_cents'] if s['loss_increment_cents'] else 0,
                decreases=max(0,-difference)//s['win_decrement_cents'] if s['win_decrement_cents'] else 0)
  elif mode!='fixed':
   field='decreases' if win and mode=='adjust' else 'increases' if not win else None
-  if field and (s['win_decrement_cents']>0 if field=='decreases' else s['multiplier_hundredths']>100 if mode=='multiply' else s['loss_increment_cents']>0):
+  if field and ((win_decrement if mode=='adjust' else s['win_decrement_cents'])>0 if field=='decreases' else s['multiplier_hundredths']>100 if mode=='multiply' else (loss_increment if mode=='adjust' else s['loss_increment_cents'])>0):
    state[field]=state.get(field,0)+1;cap=s['max_decrease_steps' if field=='decreases' else 'max_increase_steps']
-   if cap and state[field]>=cap:next_stake=s['base_cents'];state.update(increases=0,decreases=0)
+   if cap and state[field]>=cap:
+    next_stake=s['base_cents'];state.update(increases=0,decreases=0);state.pop('amount_band',None)
  floor=max(s['min_cents'],s['base_cents'] if s['stake_floor']=='base' else 100)
  state['next_cents']=max(floor,min(s['max_cents'],((next_stake+99)//100)*100))
  return state

@@ -146,7 +146,7 @@ def analyze_number(rows,n):
  return {'number':n,'hits':hits,'rate':p,'theory':theory,'average_interval':mean,'current_omission':miss,'current_omission_at_least':last_index<segment_start,'min_interval':min(intervals) if intervals else None,'max_interval':max(intervals) if intervals else None,'successor_count':M,'repeat_rate':next_sums[n]/M if M else None,'same_tail_rate':sum(r['total']%10==n%10 for r in after)/M if M else None,'neighbor_rate':sum(abs(r['total']-n)==1 for r in after)/M if M else None,'next_attributes':next_attrs,'abc':abc,'recovery_threshold':threshold,'recovery':recovery,'before':top(prev),'after':top(next_sums),'tails':top(tails),'deviation':deviation,'curve':curve,'note':'频率分母为所选窗口；后续统计仅使用有相邻下一期的命中，末期无后续不计。参考分布按三球独立且0—9均匀计算，不代表已验证Keno换算的精确理论分布，也不是未来预测。回补分母排除未观察完整时长且尚未命中的尾段。'}
 
 class Tools:
- def __init__(self,service):self.service=service;self.lock=threading.RLock();self.key=None;self.rows=[];self.daily=[];self.periods=None;self.cache={}
+ def __init__(self,service):self.service=service;self.lock=threading.RLock();self.home_lock=threading.Lock();self.key=None;self.rows=[];self.daily=[];self.periods=None;self.cache={}
  def snapshot(self):
   db=self.service.db;stat=db.query("SELECT COUNT(*) n,MAX(id) last,SUM(verification='crosschecked_abc') pending FROM draws")[0];rev=db.query('SELECT MAX(id) id FROM revisions')[0]['id'];zone=self.service.cfg['collector'].get('source_timezone') or 'America/Vancouver';key=(stat['n'],stat['last'],stat['pending'],rev,zone)
   with self.lock:
@@ -154,6 +154,16 @@ class Tools:
     raw=db.query('SELECT id,source_time,draw_utc,a,b,c,total,size,parity,numbers,verification,source FROM draws ORDER BY id');self.rows=[enrich(r,ZoneInfo(zone)) for r in raw];self.daily=daily_summary(self.rows);self.periods=None;self.key=key;self.cache={}
    return self.rows
  def run(self,q):
+  if q.get('view','home')=='home' and self.service is not None:
+   from .home_data import HomeData
+   with self.home_lock:
+    if not hasattr(self,'home_data'):self.home_data=HomeData(self.service)
+   if q.get('group','regular') not in GROUPS:raise ValueError('分组参数错误')
+   part=q.get('part','all')
+   if part not in ('all','records','summary'):raise ValueError('首页数据部分无效')
+   if part=='summary':return self.home_data.summaries(q)
+   records=self.home_data.records(q)
+   return records if part=='records' else {**records,**self.home_data.summaries(q,wait=True)}
   view=q.get('view','home');limit=int(q.get('limit',40 if view=='trend' else 500));page=int(q.get('page',1));group=q.get('group','regular')
   if not 0<=limit<=200000 or not 1<=page<=100000 or group not in GROUPS:raise ValueError('窗口、页码或分组参数错误')
   if view not in ('home','trend','dragon','missing','stats','analysis'):raise ValueError('未知工具')

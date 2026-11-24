@@ -3,7 +3,7 @@ import json,re,sqlite3,uuid
 from datetime import datetime,timezone
 from decimal import Decimal,InvalidOperation
 from zoneinfo import ZoneInfo
-from .model import utcnow,settlement,DIRECTION_AXES,direction_hits
+from .model import utcnow,settlement,ORDER_DIRECTION_AXES,direction_hits
 
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS member_accounts(user_id INTEGER PRIMARY KEY,principal INTEGER NOT NULL DEFAULT 0,balance INTEGER NOT NULL DEFAULT 0);
@@ -92,7 +92,7 @@ def import_signal(c,service,row,batch_id,placed_at,accepted_at):
  if row['is_test'] or c.execute('SELECT 1 FROM member_orders WHERE outbox_id=?',(row['id'],)).fetchone():return
  frozen_uid=member_id(c,row)
  if not frozen_uid:return
- match=re.fullmatch(r'([大小][单双]|[大小单双])(\d+(?:\.\d{1,2})?)',row['message'].strip())
+ match=re.fullmatch(r'([abc][大小]|[大小][单双]|[大小单双])(\d+(?:\.\d{1,2})?)',row['message'].strip())
  if not match:raise ValueError('会员订单无法识别推送方向与金额')
  stake=cents(match[2]);uid=frozen_uid
  if row['push_cents'] is not None and stake!=row['push_cents']:raise ValueError('会员订单金额与推送快照不一致')
@@ -149,13 +149,13 @@ def settle(c,until=None):
  from .db import defer_missing_orders
  defer_missing_orders(c,'member_orders')
  until=until or utcnow()
- rows=c.execute("SELECT o.*,d.total drawn_total,d.size drawn_size,d.parity drawn_parity,d.draw_utc FROM member_orders o JOIN draws d ON d.id=o.target_draw WHERE o.status IN ('pending','awaiting_result') AND NOT EXISTS(SELECT 1 FROM conflicts x WHERE x.draw_id=o.target_draw AND x.resolved=0) ORDER BY d.draw_utc,o.id").fetchall()
+ rows=c.execute("SELECT o.*,d.a,d.b,d.c,d.total drawn_total,d.size drawn_size,d.parity drawn_parity,d.draw_utc FROM member_orders o JOIN draws d ON d.id=o.target_draw WHERE o.status IN ('pending','awaiting_result') AND NOT EXISTS(SELECT 1 FROM conflicts x WHERE x.draw_id=o.target_draw AND x.resolved=0) ORDER BY d.draw_utc,o.id").fetchall()
  for o in rows:
   if not o['draw_utc'] or datetime.fromisoformat(o['draw_utc'])>datetime.fromisoformat(until):continue
   late=datetime.fromisoformat(o['placed_at'])>=datetime.fromisoformat(o['draw_utc'])
-  hit=direction_hits(o['direction'],o['drawn_size'],o['drawn_parity'])
+  hit=direction_hits(o['direction'],o['drawn_size'],o['drawn_parity'],o)
   paid={'pnl':0,'credit':o['stake'],'outcome':'void'} if late else settlement(o['stake'],o['direction'],o['drawn_total'],hit,json.loads(o['odds_json']))
-  result=o['drawn_size']+o['drawn_parity']
+  result=(o['direction'][0]+('大' if o[o['direction'][0]]>=5 else '小')+'（'+str(o[o['direction'][0]])+'）') if o['direction'] in ('a大','a小','b大','b小','c大','c小') else o['drawn_size']+o['drawn_parity']
   c.execute("UPDATE member_orders SET status=?,draw_time=?,result=?,total=?,pnl=?,outcome=?,settled_at=? WHERE id=?",('void' if late else 'settled',o['draw_utc'],result,o['drawn_total'],paid['pnl'],paid['outcome'],utcnow(),o['id']))
   entry(c,o['user_id'],'settle',paid['credit'],order_id=o['id'],note='发送时间不早于开奖，作废退回记账金额' if late else '按对应期开奖结算：'+paid['outcome'],created=max(o['accepted_at'],o['draw_utc']))
   if o['bot_id'] is not None:
@@ -239,7 +239,7 @@ def listing(service,q,ledger=False,user=None):
   if q.get('draw'):
    where.append('o.target_draw=?');args.append(int(q['draw']))
   if q.get('direction'):
-   if q['direction'] not in DIRECTION_AXES:raise ValueError('订单类型无效')
+   if q['direction'] not in ORDER_DIRECTION_AXES:raise ValueError('订单类型无效')
    where.append('o.direction=?');args.append(q['direction'])
   if q.get('status'):
    if q['status'] not in ('pending','awaiting_result','settled','void'):raise ValueError('订单状态无效')

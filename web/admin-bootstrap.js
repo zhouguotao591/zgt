@@ -3,6 +3,7 @@
  if(document.body.dataset.admin!=='1')return;
  const multiAccounts=!!document.getElementById('ra-table');
  const modules=[
+  {file:'strategy-phases.js',ready:()=>!!window.pc28PhasesReady},
   {file:'app.js',ready:()=>typeof api==='function'&&typeof table==='function'},
   {file:'access-admin.js',ready:()=>!!window.pc28Access},
   {file:'profit-curve.js',ready:()=>typeof window.pc28SimulationRows==='function'},

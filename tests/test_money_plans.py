@@ -62,6 +62,16 @@ class MoneyPlanTests(unittest.TestCase):
   plan=mp.listing(self.s)['rows'][0];mp.save(self.s,{'id':pid,'version':plan['version'],'name':'修订','enabled':True,'settings':{**plan['settings'],'base_cents':5000}},None,'')
   with self.s.db.tx() as c:self.assertEqual(mp.quote(c,sub)[0],5000)
   frozen=json.loads(self.s.db.query('SELECT money_plan_snapshot FROM robot_outbox')[0]['money_plan_snapshot']);self.assertEqual(frozen['version'],1)
+ def test_band_plan_roundtrip_subscription_quote_and_snapshot(self):
+  aid=self.create();pid=self.plan(mode='adjust',base_cents=400,loss_increment_cents=100,win_decrement_cents=100,low_enter_cents=500,low_exit_cents=1000,low_loss_increment_cents=200,low_win_decrement_cents=100)
+  sub=self.subscribe(aid,pid);self.signal();self.r.capture();out=self.s.db.query('SELECT * FROM robot_outbox')[0]
+  snap=json.loads(out['money_plan_snapshot']);self.assertEqual(snap['settings']['low_loss_increment_cents'],200)
+  with self.s.db.tx() as c:
+   c.execute("UPDATE robot_outbox SET status='failed' WHERE id=?",(out['id'],))
+   c.execute("INSERT INTO member_orders(user_id,outbox_id,target_draw,direction,stake,placed_at,accepted_at,odds_json,status,pnl,outcome) VALUES(?,?,999,'大',400,'t','t','{}','settled',-400,'loss')",(sub['account_id'],out['id']))
+   amount,snapshot=mp.quote(c,sub);self.assertEqual(amount,600);self.assertEqual(json.loads(snapshot)['state']['amount_band'],'low')
+   self.assertEqual(mp.quote(c,sub)[0],600)
+  self.assertEqual(mp.listing(self.s)['rows'][0]['settings']['low_enter_cents'],500)
  def test_cumulative_counters_floor_refund_and_caps(self):
   s=mp.validate({**mp.DEFAULTS,'mode':'adjust','base_cents':3000,'loss_increment_cents':100,'win_decrement_cents':100,'max_decrease_steps':2,'max_increase_steps':2});st={'next_cents':3000}
   for outcome,expected in [('win',2900),('loss',3000),('refund',3000),('win',3000)]:

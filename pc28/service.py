@@ -214,8 +214,6 @@ class Service:
   db=self.db;last=db.tail(1);latest=last[0] if last else None;fresh=False;age=None
   if latest and latest['draw_utc']:
    age=(datetime.now(timezone.utc)-datetime.fromisoformat(latest['draw_utc'])).total_seconds();fresh=-30<=age<=self.cfg['collector']['max_age_seconds']
-  account=db.query('SELECT * FROM accounts WHERE id=1')[0];account['state']=json.loads(account['state']);account['settled_net']=db.query("SELECT COALESCE(SUM(pnl),0) n FROM orders WHERE status='settled'")[0]['n']/100
-  account['pending_stake']=db.query("SELECT COALESCE(SUM(stake),0) n FROM orders WHERE status IN ('pending','awaiting_result')")[0]['n']/100
   health=self.db.query("SELECT status,finished,details FROM jobs WHERE kind='latest' ORDER BY id DESC LIMIT 1")
   collection_health=health[0] if health else None
   if collection_health:collection_health['details']=json.loads(collection_health['details'])
@@ -223,5 +221,7 @@ class Service:
   inferred=infer_break(db) if latest and age is not None and age>210 else None
   plan=inferred or dict(self.draw_timer.state);publication=publication_state(latest,plan)
   if publication['phase']!='live':fresh=False
-  if compact:return {'collection_health':collection_health,'latest':self.display_draw(latest),'publication':publication,'next_draw':plan,'fresh':fresh,'server_time':utcnow()}
+  if compact:return {'collection_health':collection_health,'latest':self.display_draw(latest),'publication':publication,'next_draw':plan,'fresh':fresh,'server_time':utcnow(),'count':db.query('SELECT COUNT(*) n FROM draws')[0]['n'],'pending_raw':db.query("SELECT COUNT(*) n FROM draws WHERE verification='crosschecked_abc'")[0]['n'],'conflicts':db.query('SELECT COUNT(*) n FROM conflicts WHERE resolved=0')[0]['n']}
+  account=db.query('SELECT * FROM accounts WHERE id=1')[0];account['state']=json.loads(account['state']);account['settled_net']=db.query("SELECT COALESCE(SUM(pnl),0) n FROM orders WHERE status='settled'")[0]['n']/100
+  account['pending_stake']=db.query("SELECT COALESCE(SUM(stake),0) n FROM orders WHERE status IN ('pending','awaiting_result')")[0]['n']/100
   return {'collection_health':collection_health,'version':'1.0.0','count':db.query('SELECT COUNT(*) n FROM draws')[0]['n'],'latest':self.display_draw(latest),'publication':publication,'next_draw':plan,'fresh':fresh,'age_seconds':age,'gaps':db.gaps(),'pending_raw':db.query("SELECT COUNT(*) n FROM draws WHERE verification='crosschecked_abc'")[0]['n'],'conflicts':db.query('SELECT COUNT(*) n FROM conflicts WHERE resolved=0')[0]['n'],'account':account,'orders':db.query('SELECT * FROM orders ORDER BY id DESC LIMIT 60'),'decisions':db.query('SELECT * FROM decisions ORDER BY target_draw DESC LIMIT 30'),'jobs':db.query('SELECT * FROM jobs ORDER BY id DESC LIMIT 20'),'tasks':list(self.tasks.values())[-20:],'selections':db.query('SELECT month,created,run_id,reason,candidates FROM selections ORDER BY month DESC LIMIT 12'),'switches':db.query('SELECT * FROM switches ORDER BY id DESC LIMIT 20'),'rounds':db.query('SELECT * FROM rounds ORDER BY id DESC LIMIT 30'),'restart_policy':self.cfg['simulation'].get('round_restart','immediate'),'mode':self.cfg['simulation']['mode'],'enabled':self.cfg['simulation']['enabled'],'server_time':utcnow()}

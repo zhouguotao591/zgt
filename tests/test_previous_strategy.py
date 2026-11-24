@@ -21,6 +21,35 @@ class PreviousStrategyTests(unittest.TestCase):
   t=self.start+timedelta(seconds=210*i);numbers=list(range(1,21)) if side=='大' else list(range(4,24));self.s.db.import_records([{'id':100+i,'time':t.isoformat(),'numbers':numbers}],'test',received=t.isoformat());return t
  def step(self,t):
   with patch('pc28.custom_strategy.utcnow',return_value=t.isoformat()),patch('pc28.follow_strategy.utcnow',return_value=t.isoformat()):tick(self.s.db,self.cfg,t)
+ def test_previous_combo_follows_all_four_directions_and_refunds(self):
+  from pc28.model import settlement
+  from pc28.strategies import require_fixed_direction,require_selected_direction
+  key,settings=self.create('combo')
+  self.assertEqual(require_fixed_direction(settings),'combo')
+  self.assertEqual(require_selected_direction(self.s,key),'combo')
+  sides=[('大','单',15),('小','单',13),('小','单',13),('大','双',14),('大','双',14),('小','双',12)]
+  for i,(size,parity,total) in enumerate(sides):
+   t=self.draw(i,'大')
+   with self.s.db.tx() as c:c.execute('UPDATE draws SET size=?,parity=?,total=? WHERE id=?',(size,parity,total,100+i))
+   self.step(t+timedelta(seconds=1))
+  orders=self.s.db.query('SELECT * FROM custom_orders WHERE strategy=? ORDER BY target_draw',(key,))
+  self.assertEqual([o['direction'] for o in orders],[a+b for a,b,_ in sides])
+  from pc28.robot_signals import RobotSignals
+  with self.s.db.tx() as c:
+   for o in orders:
+    context=RobotSignals.context(None,c,'custom',o)
+    self.assertEqual(context['direction'],o['direction'])
+    self.assertEqual(context['stake_cents'],o['stake'])
+  for i,o in enumerate(orders[:-1]):
+   size,parity,total=sides[i+1];paid=settlement(o['stake'],o['direction'],total,o['direction']==size+parity,self.cfg['odds'])
+   self.assertEqual((o['outcome'],o['pnl']),(paid['outcome'],paid['pnl']))
+  for index in (1,3):
+   self.assertEqual(orders[index]['outcome'],'refund')
+   self.assertEqual(orders[index]['pnl'],0)
+   self.assertEqual(orders[index+1]['stake'],orders[index]['stake'])
+  p=prepare(self.s,{'strategy_id':key});rows,_=source_window(self.s.db.rows(),set(),p['as_of']);_,expected=replay(rows,p['snapshot'])
+  self.assertEqual([(o['target_draw'],o['direction'],o['pnl']) for o in orders[:-1]],[(o['target_draw'],o['direction'],o['pnl']) for o in expected])
+
  def test_amount_floor_loss_and_refund(self):
   settings=defaults(self.cfg,'previous');self.assertEqual(settings['stake_floor'],'market');settings['stake_floor']='base';self.assertEqual(previous_amount(50000,'win',settings),50000);self.assertEqual(previous_amount(50000,'loss',settings),60000);self.assertEqual(previous_amount(60000,'refund',settings),60000);settings['stake_floor']='market';settings['win_decrement_cents']=100000;self.assertEqual(previous_amount(50000,'win',settings),100)
   settings['win_decrement_cents']=-1

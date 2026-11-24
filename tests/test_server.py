@@ -4,6 +4,45 @@ from pc28.config import DEFAULT
 from pc28.service import Service
 from pc28.server import LocalServer
 class ServerTests(unittest.TestCase):
+ def test_ball_follow_save_and_enable_http(self):
+  from pc28.follow_strategy import defaults
+  for axis in 'abc':
+   body={'name':'上期'+axis,'settings':defaults(self.s.cfg,'previous',axis)}
+   req=urllib.request.Request(self.url+'/api/strategy-save',data=json.dumps(body).encode(),headers={'Content-Type':'application/json','X-PC28-Token':self.server.token})
+   result=json.load(urllib.request.urlopen(req));self.assertIn('id',result)
+   req=urllib.request.Request(self.url+'/api/strategy-control',data=json.dumps({'id':result['id'],'enabled':True}).encode(),headers={'Content-Type':'application/json','X-PC28-Token':self.server.token})
+   self.assertTrue(json.load(urllib.request.urlopen(req))['ok'])
+
+ def test_public_home_fast_parts_and_lightweight_status(self):
+  from unittest.mock import patch
+  base='http://127.0.0.1:18028'
+  with patch.object(self.s.tools,'snapshot',side_effect=AssertionError('full history snapshot forbidden')):
+   records=json.load(urllib.request.urlopen(base+'/api/tools?view=home&part=records'))
+   self.assertEqual(records['rows'],[]);self.assertNotIn('summaries',records)
+   summary=json.load(urllib.request.urlopen(base+'/api/tools?view=home&part=summary'))
+   self.assertIn('loading',summary)
+   import time
+   while self.s.tools.home_data.running:time.sleep(.01)
+  with patch.object(self.s.db,'gaps',side_effect=AssertionError('full gaps forbidden')):
+   status=json.load(urllib.request.urlopen(base+'/api/status'))
+   self.assertEqual(status['count'],0);self.assertIn('next_draw',status)
+
+ def test_strategy_phase_page_and_admin_route(self):
+  import shutil
+  from pc28.portal import strip_section
+  shutil.copytree(Path(__file__).resolve().parent.parent/'web',self.root/'web')
+  page=urllib.request.urlopen(self.url).read().decode('utf8')
+  self.assertIn('data-tab="strategy-phases"',page)
+  self.assertIn('id="strategy-phases"',page)
+  self.assertNotIn('id="strategy-phases"',strip_section(page,'strategy-phases'))
+  self.assertIn('strategy-phases.js',page)
+  result=json.load(urllib.request.urlopen(self.url+'/api/admin/strategy-phases?interval=1h'))
+  self.assertIn('rows',result);self.assertEqual(result['interval'],'1h')
+  for asset in ('strategy-phases.js','strategy-phases.css'):
+   self.assertEqual(urllib.request.urlopen(self.url+'/assets/'+asset).status,200)
+  with self.assertRaises(urllib.error.HTTPError) as error:urllib.request.urlopen(self.url+'/api/admin/strategy-phases?interval=bad')
+  self.assertEqual(error.exception.code,400)
+
  def test_lightweight_health_does_not_create_sessions(self):
   import os
   from pc28.watchdog import root_id

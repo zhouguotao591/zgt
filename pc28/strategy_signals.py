@@ -63,7 +63,7 @@ class Signals:
     if c.execute('SELECT 1 FROM conflicts WHERE draw_id=? AND resolved=0',(r['id'],)).fetchone():continue
     if datetime.fromisoformat(o['created'])>=datetime.fromisoformat(r['draw_utc']):
      c.execute("UPDATE strategy_signals SET status='invalid',outcome='late',settled=? WHERE id=?",(utcnow(),o['id']));continue
-    hit=direction_hits(o['direction'],r['size'],r['parity']);paid=settlement(10000,o['direction'],r['total'],hit,json.loads(o['odds_json']))
+    hit=direction_hits(o['direction'],r['size'],r['parity'],r);paid=settlement(10000,o['direction'],r['total'],hit,json.loads(o['odds_json']))
     c.execute("UPDATE strategy_signals SET status='settled',hit=?,pnl=?,outcome=?,total=?,settled=? WHERE id=?",(int(hit),paid['pnl'],paid['outcome'],r['total'],utcnow(),o['id']))
  def tick(self,now=None):
   now=now or datetime.now(timezone.utc);self.settle(now);self.prepare();self.export();s=self.service;db=self.runtime

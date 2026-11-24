@@ -6,10 +6,22 @@ import hashlib, json
 
 CONVERSION_VERSION = 'abc-columns-v1'
 COMBO_ODDS = {'大单':4315,'小单':4750,'大双':4750,'小双':4315}
+BALL_DIRECTIONS={ball+side:ball for ball in 'abc' for side in ('大','小')}
 DIRECTION_AXES = {**dict.fromkeys(('大','小'),'size'),**dict.fromkeys(('单','双'),'parity'),**dict.fromkeys(COMBO_ODDS,'combo')}
 
+ORDER_DIRECTION_AXES = {**DIRECTION_AXES,**BALL_DIRECTIONS}
 
-def direction_hits(direction,size,parity):
+def previous_direction(row,axis):
+    if axis in ('a','b','c'):
+        value=row[axis]
+        if type(value) is not int or not 0<=value<=9:raise ValueError('球号须为0—9')
+        return axis+('大' if value>=5 else '小')
+    return row['size']+row['parity'] if axis=='combo' else row[axis]
+
+def direction_hits(direction,size,parity,row=None):
+    if direction in BALL_DIRECTIONS:
+        if row is None:raise ValueError('三球大小结算需要对应球号')
+        return direction==previous_direction(row,BALL_DIRECTIONS[direction])
     return direction in (size,parity,size+parity)
 
 
@@ -99,6 +111,9 @@ def settlement(stake, direction, total, hit, odds):
     # Old order snapshots retain their legacy 13/14 rules.
     if not hit:
         return {'pnl':-stake,'credit':0,'outcome':'loss','factor':0,'rule':'未命中'}
+    if direction in BALL_DIRECTIONS:
+        credit=min(rounded_ratio(stake,199),odds.get('max_return_per_draw_cents',10**18))
+        return {'pnl':credit-stake,'credit':credit,'outcome':'win','factor':199,'rule':'单球大小命中按1.99倍，不适用和值退本规则'}
     if total in odds.get('refund_winning_totals',[]):
         return {'pnl':0,'credit':stake,'outcome':'refund','factor':100,'rule':'0/27命中退本金'}
     if direction in COMBO_ODDS:

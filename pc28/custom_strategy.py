@@ -100,7 +100,7 @@ def tick(db,cfg,now=None):
     from .algorithm_hall import VERIFIED
     if r['verification'] not in VERIFIED or not r['draw_utc'] or datetime.fromisoformat(r['draw_utc'])>now:continue
    if o['status']=='awaiting_result':
-    hit=direction_hits(o['direction'],r['size'],r['parity']);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit']
+    hit=direction_hits(o['direction'],r['size'],r['parity'],r);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit']
     c.execute("UPDATE custom_orders SET status='settled',pnl=?,hit=?,outcome=?,total=?,settled=? WHERE id=?",(paid['pnl'],int(hit),paid['outcome'],r['total'],utcnow(),o['id']))
     c.execute("INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)",(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
     c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?) WHERE id=?',(balance,balance,o['strategy']))

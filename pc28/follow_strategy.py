@@ -4,7 +4,7 @@ from collections import Counter
 from . import win_pause,maintenance,amount_bands
 from datetime import datetime,timedelta,timezone
 from zoneinfo import ZoneInfo
-from .model import money,utcnow,settlement,rounded_ratio,stake_limit_reason,DIRECTION_AXES,direction_hits
+from .model import money,utcnow,previous_direction,settlement,rounded_ratio,stake_limit_reason,DIRECTION_AXES,direction_hits
 from .trend_strategy import risk_reason,signal,progress
 from .strategy_capital import sync_capital
 from .algorithm_hall import BY_ID,VERIFIED,predict,ranked_algorithms,RollingRanking,ALGORITHMS_PER_AXIS
@@ -99,10 +99,11 @@ def validate(cfg,value):
  if value.get('strategy_type') in PREVIOUS_AMOUNT_KINDS:value={**{'max_increase_steps':0,'max_decrease_steps':0},**value}
  if value.get('strategy_type') in (*PREVIOUS_AMOUNT_KINDS,'single'):
   value={**amount_bands.ZERO,**value};amount_bands.validate(value)
+  if value['strategy_type'] in PREVIOUS_AMOUNT_KINDS and any(value[k] for k in amount_bands.FIELDS):raise ValueError('高低金额区间请在金额配置管理中设置，再由机器人订阅选择金额方案')
  expected=set(defaults(cfg,value.get('strategy_type','hourly')))
  if set(value)!=expected:raise ValueError('跟随策略参数不完整或包含未知字段')
  direction=value['direction'];axis=value['axis'];single=value['strategy_type']=='single'
- if value['strategy_type'] not in KINDS or axis not in (('size','parity','combo') if single else ('size','parity')):raise ValueError('策略类型或维度无效')
+ if value['strategy_type'] not in KINDS or axis not in (('size','parity','combo','a','b','c') if value['strategy_type']=='previous' else ('size','parity','combo') if single else ('size','parity')):raise ValueError('策略类型或维度无效')
  if single or direction is not None:
   if not isinstance(direction,str) or DIRECTION_AXES.get(direction)!=axis:raise ValueError('请选择与策略维度匹配的开单方向')
  if value['strategy_type']=='algorithm_rank':
@@ -159,7 +160,7 @@ def next_stake(settings,losses):
  for _ in range(losses):base=rounded_ratio(base,settings['multiplier_hundredths'])
  return base
 def settle_one(c,o,r,a):
- plan=json.loads(o['strategy_json']);settings=plan['settings'];state=json.loads(a['state']);hit=direction_hits(o['direction'],r['size'],r['parity']);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit'];losses,reset=progress(state.get('losses',0),hit,settings['max_losses'])
+ plan=json.loads(o['strategy_json']);settings=plan['settings'];state=json.loads(a['state']);hit=direction_hits(o['direction'],r['size'],r['parity'],r);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit'];losses,reset=progress(state.get('losses',0),hit,settings['max_losses'])
  if adjusts_amount(settings):
   losses=0 if paid['outcome']=='win' else state.get('losses',0)+int(paid['outcome']=='loss')
   state['next_stake']=previous_amount(o['stake'],paid['outcome'],settings,state)
@@ -219,7 +220,7 @@ def tick_one(c,a,history,cfg,now):
  if c.execute('SELECT 1 FROM conflicts WHERE resolved=0 LIMIT 1').fetchone():reason='存在待核验的数据冲突'
  if c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone():reason='等待上一单结算'
  if settings['strategy_type']=='single':direction=settings['direction'];evidence=[{'cutoff_draw':latest['id'],'fixed_direction':direction}]
- elif settings['strategy_type']=='previous':direction=latest[settings['axis']];evidence=[{'cutoff_draw':latest['id'],'direction':direction}]
+ elif settings['strategy_type']=='previous':direction=previous_direction(latest,settings['axis']);evidence=[{'cutoff_draw':latest['id'],'direction':direction}]
  elif settings['strategy_type'] in ('algorithm','algorithm_rank'):
   if not reason:
    hidden={r[0] for r in c.execute("SELECT item_id FROM public_visibility WHERE kind='algorithm' AND published=0")}
@@ -262,7 +263,7 @@ def tick_one(c,a,history,cfg,now):
 def rule_text(s):return _rule_text(s)+(amount_bands.description(s) if adjusts_amount(s) else '')
 
 def _rule_text(s):
- axis='大小' if s['axis']=='size' else '单双'
+ axis={'size':'大小','parity':'单双','combo':'组合','a':'A球大小','b':'B球大小','c':'C球大小'}[s['axis']]
  if s['strategy_type']=='algorithm_rank':return f"每期按近{s['rank_window']}期胜率重排已上架{axis}算法，跟随第{s['rank_position']}名；同率按算法编号排序；基础{s['base_cents']/100:g}U，赢减{s['win_decrement_cents']/100:g}U，亏加{s['loss_increment_cents']/100:g}U"
  if s['strategy_type']=='algorithm':
   return (f"已上架{axis}算法按近20期胜率选前五，跟随预测票数较多的方向，平票跳过，每{s['algorithm_follow_draws']}期重新排名；"

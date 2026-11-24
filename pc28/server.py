@@ -105,7 +105,7 @@ class Handler(BaseHTTPRequestHandler):
    elif p.path.startswith('/api/'):
     if p.path not in member_apis:raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
     if p.path not in public_apis:auth.require(user)
-   elif p.path.startswith('/exports/') or p.path in ('/trend-risk.js','/trend-risk.css','/strategies.js','/history-backtest.js','/admin.js','/member-admin.js','/admin-bootstrap.js','/access-admin.js','/access-management.js','/profit-curve.js','/robot.js','/robot-management.js','/money-plans.js','/ai-admin.js'):raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
+   elif p.path.startswith('/exports/') or p.path in ('/strategy-phases.js','/strategy-phases.css','/trend-risk.js','/trend-risk.css','/strategies.js','/history-backtest.js','/admin.js','/member-admin.js','/admin-bootstrap.js','/access-admin.js','/access-management.js','/profit-curve.js','/robot.js','/robot-management.js','/money-plans.js','/ai-admin.js'):raise AuthError('管理功能请使用独立后台入口',403,'admin_portal_required')
    elif p.path!='/' and p.path not in public_assets:auth.require(user)
    if p.path=='/':self.send(200,portal_html(s,False,user),'text/html; charset=utf-8');return
    if p.path=='/api/admin/access':
@@ -133,7 +133,7 @@ class Handler(BaseHTTPRequestHandler):
     metrics={'bets','wins','refunds','win_rate','profitable_win_rate','net','investment','roi','max_drawdown','pending_stake','initial_balance','balance','curve'}
     self.send(200,{'strategies':[{**{k:r[k] for k in ('id','name','enabled')},'stats':{k:v for k,v in r['stats'].items() if k in metrics}} for r in rows if r['enabled']]});return
    if p.path=='/api/status':
-    compact=self.admin_scope and parse_qs(p.query).get('compact')==['1']
+    compact=not self.admin_scope or parse_qs(p.query).get('compact')==['1']
     result=s.status(compact=True) if compact else s.status()
     from .permissions import owner
     if not self.admin_scope or not owner(auth,user):
@@ -211,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
     if Path(name).name!=name or not name or '..' in name:raise ValueError('文件路径错误')
     f=s.root/'data/exports'/name
    else:
-    names={'/trend-risk.js':'trend-risk.js','/trend-risk.css':'trend-risk.css','/':'index.html','/app.js':'app.js','/style.css':'style.css','/tools.js':'tools.js','/tools.css':'tools.css','/trend-strategy.js':'trend-strategy.js','/strategies.js':'strategies.js','/history-backtest.js':'history-backtest.js','/admin.js':'admin.js','/member-admin.js':'member-admin.js','/admin-bootstrap.js':'admin-bootstrap.js','/access-admin.js':'access-admin.js','/access-management.js':'access-management.js','/account.js':'account.js','/portal.css':'portal.css','/algorithm-hall.js':'algorithm-hall.js','/income-chart.js':'income-chart.js','/algorithm-hall.css':'algorithm-hall.css','/member-auth.js':'member-auth.js','/member-auth.css':'member-auth.css','/profit-curve.js':'profit-curve.js','/robot.js':'robot.js','/money-plans.js':'money-plans.js','/money-plans.css':'money-plans.css','/robot-management.js':'robot-management.js','/robot-accounts.css':'robot-accounts.css','/ai-analysis.js':'ai-analysis.js','/ai-analysis.css':'ai-analysis.css','/ai-admin.js':'ai-admin.js','/strategy-center.js':'strategy-center.js','/strategy-center.css':'strategy-center.css'}
+    names={'/strategy-phases.js':'strategy-phases.js','/strategy-phases.css':'strategy-phases.css','/trend-risk.js':'trend-risk.js','/trend-risk.css':'trend-risk.css','/':'index.html','/app.js':'app.js','/style.css':'style.css','/tools.js':'tools.js','/tools.css':'tools.css','/trend-strategy.js':'trend-strategy.js','/strategies.js':'strategies.js','/history-backtest.js':'history-backtest.js','/admin.js':'admin.js','/member-admin.js':'member-admin.js','/admin-bootstrap.js':'admin-bootstrap.js','/access-admin.js':'access-admin.js','/access-management.js':'access-management.js','/account.js':'account.js','/portal.css':'portal.css','/algorithm-hall.js':'algorithm-hall.js','/income-chart.js':'income-chart.js','/algorithm-hall.css':'algorithm-hall.css','/member-auth.js':'member-auth.js','/member-auth.css':'member-auth.css','/profit-curve.js':'profit-curve.js','/robot.js':'robot.js','/money-plans.js':'money-plans.js','/money-plans.css':'money-plans.css','/robot-management.js':'robot-management.js','/robot-accounts.css':'robot-accounts.css','/ai-analysis.js':'ai-analysis.js','/ai-analysis.css':'ai-analysis.css','/ai-admin.js':'ai-admin.js','/strategy-center.js':'strategy-center.js','/strategy-center.css':'strategy-center.css'}
     if p.path not in names:self.send(404,{'error':'不存在'});return
     f=s.root/'web'/names[p.path]
    if not f.is_file():self.send(404,{'error':'文件不存在'});return
