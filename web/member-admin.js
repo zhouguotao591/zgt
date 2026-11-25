@@ -13,11 +13,11 @@
   el(kind+'-error').textContent='';pager(kind,d);
   if(kind==='orders')table('mf-orders-table',[
    ['会员','username'],['期号','target_draw'],['发送时间（北京时间）',r=>date(r.placed_at)],
-   ['实际跟单数据',r=>`<strong class="mf-bet">${esc(r.direction)} ${money(r.stake)} U</strong>`],
+   ['实际跟单数据',r=>`<strong class="mf-bet">${r.outcome==='offset'?'已全额对冲':esc(r.direction)+' '+money(r.stake)+' U'}</strong>${r.original_stake!=null&&r.original_stake!==r.stake?`<small class="mf-order-sub">策略原单 ${esc(r.original_message)} · 对冲 ${money(r.original_stake-r.stake)} U</small>`:''}`],
    ['本期开奖结果',r=>r.total==null?'待开奖':`<strong>${[r.draw_a,r.draw_b,r.draw_c].every(v=>v!=null)&&r.draw_a+r.draw_b+r.draw_c===r.total?esc([r.draw_a,r.draw_b,r.draw_c].join('+'))+' = ':''}${r.total}</strong><small class="mf-order-sub">${esc(r.result||'')}</small>`],
    ['盈亏（U）',r=>r.pnl==null?'—':cash(r.pnl/100)],
-   ['余额变化（U）',r=>`<div class="mf-balance-line"><span>下注扣款</span> ${money(r.before_balance)} → ${money(r.after_stake_balance)}</div><div class="mf-balance-line"><span>结算返还</span> ${r.before_settle_balance==null?'待结算':money(r.before_settle_balance)+' → '+money(r.after_settle_balance)}</div>`],
-   ['结果',r=>r.status==='pending'?'待开奖':outcome[r.outcome]||status[r.status]],
+   ['余额变化（U）',r=>r.outcome==='offset'?'无资金变化':`<div class="mf-balance-line"><span>下注扣款</span> ${money(r.before_balance)} → ${money(r.after_stake_balance)}</div><div class="mf-balance-line"><span>结算返还</span> ${r.before_settle_balance==null?'待结算':money(r.before_settle_balance)+' → '+money(r.after_settle_balance)}</div>`],
+   ['结果',r=>r.outcome==='offset'?'已对冲，无资金变化':r.status==='pending'?'待开奖':outcome[r.outcome]||status[r.status]],
    ['明细',r=>`<button class="secondary" data-mf-order="${r.id}">查看</button>`]
   ],d.rows);
   else table('mf-ledger-table',[

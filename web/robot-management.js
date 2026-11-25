@@ -134,6 +134,8 @@ window.pc28RobotReady=true;
     number('loss-streak','连续亏损多少笔暂停',r?.loss_streak_limit||0,'','0')+
     number('pause-draws','逐笔盈亏暂停多少期后恢复（至少1期）',r?.pause_draws||20,'','1')+'</div>'+
     '<h4>合并订单连续亏损暂停（独立设置）</h4><div class="ra-form-grid">'+
+    number('profit-pause-amount','盈利多少金额暂停（U，0关闭）',(r?.profit_pause_amount||0)/100,'','0')+
+    number('profit-pause-draws','盈利达标后停止多少期（0关闭）',r?.profit_pause_draws||0,'','0')+
     number('merged-loss','合并订单连续亏损多少笔暂停（0关闭）',r?.merged_loss_limit||0,'','0')+
     number('merged-pause','合并订单暂停多少期后恢复',r?.merged_pause_draws||20,'','1')+'</div><p class="muted">同一机器人同一期全部有效订单结算后，必须全部不中奖（全部判负）才计连亏1笔，不按盈亏金额判断；其中任一笔中奖或退本金则清零，未结算或待核对时暂不判断。无订单的期数不计数。达到阈值暂停整个机器人，到期恢复并清零。首次开启从当前期之后开始统计。</p>'+
     '<p class="muted">校准金额填写接收端当前已扣除下注本金的实际可用余额。保存后以该金额重建盈亏和峰值基准，并记录当时已有的在途订单，后续结算按实际返还金额更新；新增订单继续预留资金。会员余额和机器人额度均须足够支付整批订单，可用金额低于固定止损金额时暂停。已暂停机器人请在核对资金后人工恢复。</p>';
@@ -163,7 +165,7 @@ window.pc28RobotReady=true;
   const action=m.type.slice(5),body={id:m.account.id,bot_id:m.bot.id,bot_version:m.bot.version,action};
   if(action==='save'){
    const scaled=id=>Math.round(Number($('risk-'+id).value)*100);
-   Object.assign(body,{daily_loss_limit:scaled('daily-loss'),max_drawdown:scaled('max-dd'),max_stake:scaled('max-stake'),win_limit:Number($('risk-win-limit').value),loss_streak_limit:Number($('risk-loss-streak').value),merged_loss_limit:Number($('risk-merged-loss').value),merged_pause_draws:Number($('risk-merged-pause').value),pause_draws:Number($('risk-pause-draws').value),capital:scaled('capital'),loss_mode:$('risk-mode').value,loss_limit:scaled('limit'),profit_target:scaled('target'),trailing_bps:scaled('trailing'),fixed_stop_balance:scaled('fixed-stop')});if($('risk-calibration').value.trim()!=='')body.calibration_amount=scaled('calibration');
+   Object.assign(body,{profit_pause_amount:scaled('profit-pause-amount'),profit_pause_draws:Number($('risk-profit-pause-draws').value),daily_loss_limit:scaled('daily-loss'),max_drawdown:scaled('max-dd'),max_stake:scaled('max-stake'),win_limit:Number($('risk-win-limit').value),loss_streak_limit:Number($('risk-loss-streak').value),merged_loss_limit:Number($('risk-merged-loss').value),merged_pause_draws:Number($('risk-merged-pause').value),pause_draws:Number($('risk-pause-draws').value),capital:scaled('capital'),loss_mode:$('risk-mode').value,loss_limit:scaled('limit'),profit_target:scaled('target'),trailing_bps:scaled('trailing'),fixed_stop_balance:scaled('fixed-stop')});if($('risk-calibration').value.trim()!=='')body.calibration_amount=scaled('calibration');
   }else if(action==='resume')body.reset=$('risk-reset').value==='reset';
   else Object.assign(body,{outbox_id:Number($('risk-outbox').value),confirmed:$('risk-confirmed').checked});
   await apiPost('bot-risk',body);await saved(m.account.id);

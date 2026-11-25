@@ -40,6 +40,8 @@ def initialize(service):
   fields={r['name'] for r in c.execute('PRAGMA table_info(member_orders)')}
   for key in ('follow_account_id','bot_id'):
    if key not in fields:c.execute('ALTER TABLE member_orders ADD COLUMN '+key+' INTEGER')
+  for key,definition in (('original_stake','INTEGER'),('original_message','TEXT')):
+   if key not in fields:c.execute('ALTER TABLE member_orders ADD COLUMN '+key+' '+definition)
   c.execute('CREATE INDEX IF NOT EXISTS member_orders_robot_risk ON member_orders(bot_id,status,id)')
   c.execute('UPDATE member_orders SET follow_account_id=(SELECT follow_account_id FROM robot_outbox WHERE id=outbox_id),bot_id=(SELECT bot_id FROM robot_outbox WHERE id=outbox_id) WHERE follow_account_id IS NULL')
   first=not c.execute("SELECT 1 FROM member_finance_migrations WHERE name='initial-members-v1'").fetchone()
@@ -90,11 +92,13 @@ def admit(c,rows):
 
 def import_signal(c,service,row,batch_id,placed_at,accepted_at):
  if row['is_test'] or c.execute('SELECT 1 FROM member_orders WHERE outbox_id=?',(row['id'],)).fetchone():return
+ from .order_netting import effective
+ row=effective(c,row)
  frozen_uid=member_id(c,row)
  if not frozen_uid:return
  match=re.fullmatch(r'([abc][大小]|[大小][单双]|[大小单双])(\d+(?:\.\d{1,2})?)',row['message'].strip())
  if not match:raise ValueError('会员订单无法识别推送方向与金额')
- stake=cents(match[2]);uid=frozen_uid
+ stake=0 if row.get('original_cents') is not None and row['push_cents']==0 else cents(match[2]);uid=frozen_uid
  if row['push_cents'] is not None and stake!=row['push_cents']:raise ValueError('会员订单金额与推送快照不一致')
  odds=json.loads(row['member_odds']) if 'member_odds' in row.keys() and row['member_odds'] else service.cfg['odds']
  if not ('member_odds' in row.keys() and row['member_odds']):
@@ -104,7 +108,10 @@ def import_signal(c,service,row,batch_id,placed_at,accepted_at):
    if old and old[0]:odds=json.loads(old[0]).get('odds',odds) if row['engine']=='legacy' else json.loads(old[0])
  cur=c.execute('INSERT INTO member_orders(user_id,outbox_id,batch_id,platform_id,strategy_name,target_draw,direction,stake,placed_at,accepted_at,odds_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(uid,row['id'],batch_id,row['platform_id'],row['strategy_name'],row['target_draw'],match[1],stake,placed_at,accepted_at,json.dumps(odds)))
  c.execute('UPDATE member_orders SET follow_account_id=?,bot_id=? WHERE id=?',(row['follow_account_id'] if 'follow_account_id' in row.keys() else None,row['bot_id'] if 'bot_id' in row.keys() else None,cur.lastrowid))
- entry(c,uid,'stake',-stake,order_id=cur.lastrowid,note='接收端成功接收跟单信号',created=accepted_at)
+ c.execute('UPDATE member_orders SET original_stake=?,original_message=? WHERE id=?',(row.get('original_cents',stake),row.get('original_message',row['message']),cur.lastrowid))
+ if not stake:
+  c.execute("UPDATE member_orders SET status='void',pnl=0,outcome='offset',settled_at=? WHERE id=?",(accepted_at,cur.lastrowid))
+ else:entry(c,uid,'stake',-stake,order_id=cur.lastrowid,note='净额信号接口已接收' if 'original_cents' in row else '接收端成功接收跟单信号',created=accepted_at)
 
 def settle_sent(c, service):
  from .order_confirmation import reconcile_submission_receipts
@@ -155,6 +162,15 @@ def settle(c,until=None):
   late=datetime.fromisoformat(o['placed_at'])>=datetime.fromisoformat(o['draw_utc'])
   hit=direction_hits(o['direction'],o['drawn_size'],o['drawn_parity'],o)
   paid={'pnl':0,'credit':o['stake'],'outcome':'void'} if late else settlement(o['stake'],o['direction'],o['drawn_total'],hit,json.loads(o['odds_json']))
+  if not late and o['original_message'] is not None and o['batch_id']:
+   batch=c.execute('SELECT request FROM robot_batches WHERE id=?',(o['batch_id'],)).fetchone()
+   if batch and json.loads(batch[0]).get('netting'):
+    group=c.execute('SELECT id,stake FROM member_orders WHERE batch_id=? AND direction=? AND odds_json=? AND stake>0 ORDER BY id',(o['batch_id'],o['direction'],o['odds_json'])).fetchall()
+    total_stake=sum(item['stake'] for item in group)
+    whole=settlement(total_stake,o['direction'],o['drawn_total'],hit,json.loads(o['odds_json']))
+    before=sum(item['stake'] for item in group if item['id']<o['id'])
+    credit=whole['credit']*(before+o['stake'])//total_stake-whole['credit']*before//total_stake
+    paid={**whole,'credit':credit,'pnl':credit-o['stake']}
   result=(o['direction'][0]+('大' if o[o['direction'][0]]>=5 else '小')+'（'+str(o[o['direction'][0]])+'）') if o['direction'] in ('a大','a小','b大','b小','c大','c小') else o['drawn_size']+o['drawn_parity']
   c.execute("UPDATE member_orders SET status=?,draw_time=?,result=?,total=?,pnl=?,outcome=?,settled_at=? WHERE id=?",('void' if late else 'settled',o['draw_utc'],result,o['drawn_total'],paid['pnl'],paid['outcome'],utcnow(),o['id']))
   entry(c,o['user_id'],'settle',paid['credit'],order_id=o['id'],note='发送时间不早于开奖，作废退回记账金额' if late else '按对应期开奖结算：'+paid['outcome'],created=max(o['accepted_at'],o['draw_utc']))

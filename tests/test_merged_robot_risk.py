@@ -17,6 +17,26 @@ class MergedRobotRiskTests(unittest.TestCase):
         self.order(c,uid,bid,oid,100,pnl)
         c.execute('UPDATE member_orders SET target_draw=?,outcome=? WHERE id=?',(draw,None if pnl is None else 'win' if pnl>0 else 'loss' if pnl<0 else 'refund',oid))
 
+    def test_profit_amount_pause_and_recovery(self):
+        uid,bid=self.context()
+        with self.s.db.tx() as c:
+            robot_risk.save(c,bid,{**self.policy,'profit_pause_amount':100,'profit_pause_draws':3})
+            self.add(c,uid,bid,1,100,100)
+            risk=robot_risk.check(c,bid)
+            self.assertIn('盈利金额',risk['paused'])
+            until=risk['pause_until_draw']
+            self.assertEqual(robot_risk.check(c,bid)['pause_until_draw'],until)
+            c.execute("INSERT INTO draws(id,source_time,numbers,first_seen,source,raw_hash) VALUES(?,'t','[]','t','test','test')",(until,))
+            self.assertFalse(robot_risk.check(c,bid)['paused'])
+            self.assertFalse(robot_risk.check(c,bid)['paused'])
+
+    def test_zero_profit_pause_draws_disables(self):
+        uid,bid=self.context()
+        with self.s.db.tx() as c:
+            robot_risk.save(c,bid,{**self.policy,'profit_pause_amount':100,'profit_pause_draws':0})
+            self.add(c,uid,bid,1,100,100)
+            self.assertFalse(robot_risk.check(c,bid)['paused'])
+
     def test_all_lost_by_draw_and_independent_pause(self):
         uid,bid=self.context()
         with self.s.db.tx() as c:

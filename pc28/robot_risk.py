@@ -30,6 +30,9 @@ def migrate(c):
         ('merged_loss_limit', 'INTEGER NOT NULL DEFAULT 0'),
         ('merged_pause_draws', 'INTEGER NOT NULL DEFAULT 20'),
         ('merged_baseline_draw', 'INTEGER NOT NULL DEFAULT 0'),
+        ('profit_pause_amount', 'INTEGER NOT NULL DEFAULT 0'),
+        ('profit_pause_draws', 'INTEGER NOT NULL DEFAULT 0'),
+        ('profit_pause_baseline', 'INTEGER NOT NULL DEFAULT 0'),
     ):
         if name not in fields:
             c.execute(f'ALTER TABLE robot_risk ADD COLUMN {name} {definition}')
@@ -175,6 +178,11 @@ def check(c, bot_id):
         if reason:
             c.execute('UPDATE robot_risk SET paused=? WHERE bot_id=?', (reason, bot_id))
             risk['paused'] = reason
+        if not reason and risk['profit_pause_amount'] and risk['profit_pause_draws'] and risk['net']-risk['profit_pause_baseline']>=risk['profit_pause_amount']:
+            latest=c.execute('SELECT COALESCE(MAX(id),0) FROM draws').fetchone()[0]
+            until=latest+risk['profit_pause_draws']
+            c.execute("UPDATE robot_risk SET paused='机器人盈利金额达标暂停',pause_until_draw=?,profit_pause_baseline=? WHERE bot_id=?",(until,risk['net'],bot_id))
+            risk.update(paused='机器人盈利金额达标暂停',pause_until_draw=until,profit_pause_baseline=risk['net'])
     return risk
 
 
@@ -209,6 +217,10 @@ def save(c, bot_id, body):
     c.execute("""INSERT OR IGNORE INTO robot_risk_holds
         SELECT id,bot_id,push_cents FROM robot_outbox WHERE bot_id=? AND is_test=0
         AND status IN ('sending','retry') AND attempts>0 AND push_cents>0""", (bot_id,))
+    for key in ('profit_pause_amount','profit_pause_draws'):
+        if key in body:
+            value=integer(body[key],key,0,1000000000000 if key=='profit_pause_amount' else 100000)
+            c.execute('UPDATE robot_risk SET '+key+'=? WHERE bot_id=?',(value,bot_id))
     return check(c, bot_id)
 
 
@@ -222,6 +234,7 @@ def calibrate(c, bot_id, available):
     c.execute("UPDATE robot_risk SET calibration_revision=1,paused=CASE WHEN paused<>'' THEN '校准金额已更新，请人工恢复订单' ELSE '' END WHERE bot_id=?",(bot_id,))
     c.execute('UPDATE robot_risk SET calibration_amount=?,calibration_pending=?,calibration_baseline=?,calibrated_at=? WHERE bot_id=?',
               (available, pending, baseline(c), utcnow(), bot_id))
+    c.execute('UPDATE robot_risk SET profit_pause_baseline=0 WHERE bot_id=?',(bot_id,))
 
 
 def admit(c, bot_id, members):
@@ -270,6 +283,7 @@ def resume(c, bot_id, reset):
         else:
             c.execute('UPDATE robot_risk SET baseline=? WHERE bot_id=?', (baseline(c), bot_id))
         risk = state(c, bot_id)
+        c.execute('UPDATE robot_risk SET profit_pause_baseline=0 WHERE bot_id=?',(bot_id,))
     if risk['fixed_stop_balance'] > 0 and risk['available'] < risk['fixed_stop_balance']:
         raise ValueError('可用金额仍低于固定止损金额，请先校准实际资金或调整止损金额')
     if risk['net'] - risk['risk_pending'] - risk['risk_held'] <= risk['floor']:

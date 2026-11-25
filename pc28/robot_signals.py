@@ -416,6 +416,13 @@ class RobotSignals(Accounts,Platforms):
     if row['is_test']:wire=json.loads(row['request'])
     else:
      wire['payload']={'symbol':'PC28','text':message}
+     from .order_netting import preview
+     plan=preview(members)
+     if plan['execution_cents']<plan['original_cents']:
+      wire['netting']=plan
+      wire['payload']['text']=plan['text']
+      wire.pop('execution_callback',None)
+      wire.pop('orders',None)
     c.execute('INSERT INTO robot_batches(id,request,created,endpoint) VALUES(?,?,?,?)',(batch_id,json.dumps(wire,ensure_ascii=False),utcnow(),platform['endpoint']))
     if not row['is_test']:c.execute('INSERT INTO robot_delivery_slots VALUES(?,?,?)',(row['recipient_id'],row['target_draw'],batch_id))
     for r in members:c.execute('INSERT INTO robot_batch_items VALUES(?,?)',(r['id'],batch_id))
@@ -460,7 +467,7 @@ class RobotSignals(Accounts,Platforms):
      return True
     wire.update(deadline)
     c.execute('UPDATE robot_batches SET request=? WHERE id=?',(json.dumps(wire,ensure_ascii=False),batch_id))
-    required=bool(platform.get('execution_required') or 'execution_callback' in wire)
+    required=not wire.get('netting') and bool(platform.get('execution_required') or 'execution_callback' in wire)
     callback_url=''
     if required:
      from .robot_platforms import execution_callback_origin
@@ -474,18 +481,27 @@ class RobotSignals(Accounts,Platforms):
      if trend_reason:
       c.execute("UPDATE robot_outbox SET status='cancelled',last_error=?,finished=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",(trend_reason+'；合并消息整体取消',utcnow(),batch_id));return True
     from .member_orders import admit as member_admit
-    funds_reason=member_admit(c,members)
+    from .order_netting import effective
+    execution_members=[effective(c,m) for m in members]
+    execution_members=[m for m in execution_members if m['push_cents']>0]
+    if not execution_members and wire.get('netting'):
+     from .member_orders import import_signal
+     at=utcnow()
+     for member in members:import_signal(c,self.service,member,batch_id,at,at)
+     c.execute("UPDATE robot_outbox SET status='sent',last_error='全额对冲，无需发送',finished=?,accepted_at=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",(at,at,batch_id))
+     return True
+    funds_reason=member_admit(c,execution_members)
     if funds_reason:
      c.execute("UPDATE robot_outbox SET status='cancelled',last_error=?,finished=? WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)",(funds_reason,utcnow(),batch_id))
      return True
     if row.get('bot_id') is not None:
-     risk_reason=robot_risk.admit(c,row['bot_id'],members)
+     risk_reason=robot_risk.admit(c,row['bot_id'],execution_members)
      if risk_reason:
       c.execute("""UPDATE robot_outbox SET status='cancelled',last_error=?,finished=?
                    WHERE id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)""",
                 (risk_reason,utcnow(),batch_id));return True
     c.executemany('INSERT OR IGNORE INTO robot_risk_holds VALUES(?,?,?)',
-                  ((member['id'],member['bot_id'] or 0,member['push_cents']) for member in members))
+                  ((member['id'],member['bot_id'] or 0,member['push_cents']) for member in execution_members))
     order_confirmation.attach(c,wire,members,required,callback_url)
     if required:wire['execution_callback']['platform_id']=row['platform_id']
     c.execute('UPDATE robot_batches SET request=? WHERE id=?',(json.dumps(wire,ensure_ascii=False),batch_id))
@@ -567,6 +583,13 @@ class RobotSignals(Accounts,Platforms):
   rows=self.db.query("SELECT MAX(id) id,MAX(event_id) event_id,MAX(name) name,GROUP_CONCAT(DISTINCT strategy_name) strategy_name,MAX(target_draw) target_draw,MIN(created) created,GROUP_CONCAT(message,' ') message,MAX(status) status,MAX(attempts) attempts,MAX(last_status) last_status,MAX(last_error) last_error,MAX(finished) finished,MAX(is_test) is_test,MAX(recipient_id) recipient_id,MAX(recipient_name) recipient_name,MAX(platform_id) platform_id,MAX(follow_account_id) follow_account_id,MAX(bot_id) bot_id,MAX(batch_id) batch_id,MIN(created) cached_at,MAX(scheduled_at) scheduled_at,MAX(sent_at) sent_at,MAX(accepted_at) accepted_at,MAX(needs_reconciliation) needs_reconciliation,COUNT(*) order_count FROM "+source+' WHERE '+where+' GROUP BY message_group ORDER BY MAX(id) DESC LIMIT ? OFFSET ?',(*args,size,(page-1)*size))
   names={p['id']:p['name'] for p in self.platforms()}
   for r in rows:
+   if r['batch_id']:
+    frozen=self.db.query('SELECT request FROM robot_batches WHERE id=?',(r['batch_id'],))
+    plan=json.loads(frozen[0]['request']).get('netting') if frozen else None
+    if plan:
+     r['original_message']=r['message']
+     r['message']=plan['text'] or '全额对冲，无需发送'
+     r['netting']=plan
    r['platform_name']=names.get(r['platform_id'],'未知平台');a=self.db.query('SELECT name,external_account_id FROM robot_accounts WHERE id=?',(r['follow_account_id'],));b=self.db.query('SELECT name,external_bot_key FROM robot_bots WHERE id=?',(r['bot_id'],));r.update(account_name=a[0]['name'] if a else '历史账号',external_account_id=a[0]['external_account_id'] if a else None,bot_name=b[0]['name'] if b else '历史机器人',external_bot_key=b[0]['external_bot_key'] if b else None)
   return {'rows':rows,'total':total,'page':page,'pages':pages,'page_size':size}
  def batch_detail(self,key):
@@ -575,6 +598,12 @@ class RobotSignals(Accounts,Platforms):
   row=row[0];batch=row['batch_id']
   selection='o.id IN (SELECT outbox_id FROM robot_batch_items WHERE batch_id=?)' if batch else 'o.id=?'
   items=self.db.query('SELECT o.id,o.id AS outbox_id,o.strategy_name,o.simulation_cents,o.push_cents,o.message,o.status,o.last_error,o.sent_at,o.accepted_at,e.status AS execution_status,e.detail AS execution_detail FROM robot_outbox o LEFT JOIN robot_execution e ON e.outbox_id=o.id WHERE '+selection+' ORDER BY o.id',(batch or row['id'],))
+  from .order_netting import effective
+  with self.db.tx() as c:
+   for item in items:
+    actual=effective(c,item)
+    item['execution_cents']=actual['push_cents']
+    item['execution_message']=actual['message']
   wire=json.loads(row['request'])
   if batch:
    stored=self.db.query('SELECT request FROM robot_batches WHERE id=?',(batch,))
