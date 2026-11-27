@@ -165,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
    if p.path=='/api/strategy-defaults':
     from .follow_strategy import defaults
     q=parse_qs(p.query);kind=q.get('kind',['hourly'])[0];axis=q.get('axis',['size'])[0]
-    if kind not in ('hourly','majority','previous','single','algorithm','algorithm_rank') or axis not in ('size','parity'):raise ValueError('策略类型或维度无效')
+    if kind not in ('hourly','majority','previous','single','algorithm','algorithm_rank','combo_reverse') or axis not in ('size','parity'):raise ValueError('策略类型或维度无效')
     self.send(200,defaults(s.cfg,kind,axis));return
    if p.path=='/api/history-backtests':
     from .history_backtest import metadata

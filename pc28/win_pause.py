@@ -18,6 +18,7 @@ def paused(state,target):
 
 def restart(state):
  """Restart a halted strategy without leaving a simultaneous timed pause behind."""
+ for child in state.get('type_states',{}).values():restart(child)
  if state.get('difference_paused'):state.update(win_streak=0,pause_until=0)
  state.update(win_loss_difference=0,difference_paused=False)
  return state

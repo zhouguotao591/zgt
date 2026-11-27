@@ -8,6 +8,7 @@ IDS=('legacy','parity','size')
 def require_fixed_direction(settings):
  if not isinstance(settings,dict):raise ValueError('策略参数必须是对象')
  if 'fixed' in settings and not isinstance(settings['fixed'],dict):raise ValueError('反转策略参数无效')
+ if settings.get('strategy_type')=='combo_reverse':return 'combo'
  if settings.get('strategy_type') in ('previous','algorithm','algorithm_rank','majority'):
   allowed=('size','parity','combo','a','b','c') if settings.get('strategy_type')=='previous' else ('size','parity')
   if settings.get('axis') not in allowed:raise ValueError('请选择有效的跟随下单类型')

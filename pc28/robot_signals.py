@@ -343,7 +343,8 @@ class RobotSignals(Accounts,Platforms):
         subscription=c.execute('SELECT * FROM robot_subscriptions WHERE bot_id=? AND strategy_id=? AND enabled=1',(mapping['bot_id'],context['strategy_id'])).fetchone() if mapping else None
         if not subscription:continue
         try:
-         cents,snapshot=quote(c,subscription)
+         from .previous_types import signal_type
+         cents,snapshot=quote(c,subscription,previous_type=signal_type(o))
         except ValueError as error:
          c.execute('INSERT OR IGNORE INTO robot_capture_skips VALUES(?,?,?,?,?,?,?,?)',(engine,o['id'],mapping['account_id'],mapping['bot_id'],context['strategy_id'],o['target_draw'],str(error),utcnow()))
          if isinstance(error,AwaitingSettlement):

@@ -13,6 +13,7 @@ ACTIONS=[
  ('strategy.publish','strategies','上下架策略','[data-strategy-publish],#strategy-bulk-publish,#strategy-bulk-unpublish'),('algorithm.publish','algorithm-hall','上下架算法','[data-algo-publish]'),
  ('strategy.add.reversal','strategies','添加反转策略','#strategy-add'),('strategy.add.hourly','strategies','添加小时策略','#strategy-add-hourly'),('strategy.add.majority','strategies','添加占优策略','#strategy-add-majority'),('strategy.add.single','strategies','添加单边策略','#strategy-add-single'),('strategy.add.previous','strategies','添加上期策略','#strategy-add-previous'),('strategy.add.algorithm','strategies','添加算法跟随策略','#strategy-add-algorithm'),
  ('strategy.add.algorithm_rank','strategies','算法排名自动跟随策略','#strategy-add-rank'),
+ ('strategy.add.combo_reverse','strategies','添加组合连开反买策略','#strategy-add-combo-reverse'),
  ('strategy.edit','strategies','编辑策略参数','[data-strategy-edit]'),('strategy.control','strategies','启用 / 停用策略','[data-strategy-control],#strategy-bulk-disable'),('strategy.delete','strategies','删除策略','[data-strategy-delete],#strategy-delete-save,#strategy-bulk-delete'),('strategy.backtest','strategies','策略列表发起回测','[data-strategy-backtest]'),
  ('simulation.profit','simulation','查看收益曲线','[data-profit-curve],#profit-refresh,#profit-backfill'),
  ('backtest.chart','history-backtest','切换回测图表周期','[data-k-interval]'),

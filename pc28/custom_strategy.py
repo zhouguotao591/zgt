@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS gap_order_backfills(run_id TEXT PRIMARY KEY,created T
 CREATE TABLE IF NOT EXISTS gap_order_tags(engine TEXT,order_id INTEGER,run_id TEXT NOT NULL,PRIMARY KEY(engine,order_id));
 CREATE TABLE IF NOT EXISTS deleted_strategies(id TEXT PRIMARY KEY,name TEXT NOT NULL,deleted_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS custom_strategies(id TEXT PRIMARY KEY,name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 0,settings TEXT NOT NULL,balance INTEGER,initial_balance INTEGER,peak INTEGER,state TEXT NOT NULL DEFAULT '{}',created TEXT);
-CREATE TABLE IF NOT EXISTS custom_orders(id INTEGER PRIMARY KEY,strategy TEXT,target_draw INTEGER,cutoff_draw INTEGER,created TEXT,direction TEXT,ratio REAL,stake INTEGER,status TEXT,pnl INTEGER,hit INTEGER,outcome TEXT,total INTEGER,settled TEXT,cycle INTEGER,step INTEGER,max_bets INTEGER,strategy_json TEXT,odds_json TEXT,restart_policy TEXT,UNIQUE(strategy,target_draw));
+CREATE TABLE IF NOT EXISTS custom_orders(id INTEGER PRIMARY KEY,strategy TEXT,target_draw INTEGER,cutoff_draw INTEGER,created TEXT,direction TEXT,ratio REAL,stake INTEGER,status TEXT,pnl INTEGER,hit INTEGER,outcome TEXT,total INTEGER,settled TEXT,cycle INTEGER,step INTEGER,max_bets INTEGER,strategy_json TEXT,odds_json TEXT,restart_policy TEXT,UNIQUE(strategy,target_draw,direction));
 CREATE TABLE IF NOT EXISTS custom_ledger(id INTEGER PRIMARY KEY,strategy TEXT,order_id INTEGER,created TEXT,kind TEXT,amount INTEGER,balance INTEGER,UNIQUE(order_id,kind));
 CREATE TABLE IF NOT EXISTS custom_decisions(strategy TEXT,target_draw INTEGER,created TEXT,action TEXT,reason TEXT,PRIMARY KEY(strategy,target_draw));
 CREATE INDEX IF NOT EXISTS custom_orders_algorithm_type ON custom_orders(json_extract(strategy_json,'$.strategy_type'),status,target_draw);
@@ -24,6 +24,8 @@ def initialize(db):
   for sql in SCHEMA.split(';'):
    if sql.strip():c.execute(sql)
   if 'pause_json' not in {r[1] for r in c.execute('PRAGMA table_info(custom_orders)')}:c.execute('ALTER TABLE custom_orders ADD COLUMN pause_json TEXT')
+  from .order_direction_migration import migrate
+  migrate(c,'custom_orders')
   from .amount_bands import ZERO
   for row in c.execute('SELECT id,settings FROM custom_strategies').fetchall():
    settings=json.loads(row['settings'])
@@ -43,7 +45,7 @@ def validate_settings(cfg,settings):
 def save(service,body):
  from .strategy_delete import require_available
  require_available(service.db,body.get("id"))
- if isinstance(body.get('settings'),dict) and body['settings'].get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
+ if isinstance(body.get('settings'),dict) and body['settings'].get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank','combo_reverse'):
   from .follow_strategy import save as save_follow
   return save_follow(service,body)
  if body.get('id') in ('parity','size'):
@@ -105,7 +107,7 @@ def tick(db,cfg,now=None):
     c.execute("INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)",(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
     c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?) WHERE id=?',(balance,balance,o['strategy']))
     continue
-   if kind in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
+   if kind in ('hourly','majority','previous','single','algorithm','algorithm_rank','combo_reverse'):
     from .follow_strategy import settle_one
     settle_one(c,o,r,a);continue
    st=json.loads(a['state']);s=Strategy(**json.loads(o['strategy_json']));hit=r[s.axis]==s.direction;paid=settlement(o['stake'],s.direction,r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit']
@@ -118,13 +120,14 @@ def tick(db,cfg,now=None):
    c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?),state=? WHERE id=?',(balance,balance,json.dumps(st,ensure_ascii=False),o['strategy']))
  rank_windows=[json.loads(r['settings']).get('rank_window',0) for r in db.query('SELECT settings FROM custom_strategies WHERE enabled=1')]
  from .algorithm_hall import MAX_ALGORITHM_LOOKBACK
- history=db.tail(max(1001,max(rank_windows,default=0)+MAX_ALGORITHM_LOOKBACK))
+ combo_windows=[json.loads(r['settings']).get('run_length',0)+json.loads(r['settings']).get('prior_opposite_draws',0)+1 for r in db.query('SELECT settings FROM custom_strategies WHERE enabled=1')]
+ history=db.tail(max(1001,max(rank_windows,default=0)+MAX_ALGORITHM_LOOKBACK,max(combo_windows,default=0)))
  if not history:return
  latest=history[-1];target=latest['id']+1
  with db.tx() as c:
   for a in c.execute('SELECT * FROM custom_strategies WHERE enabled=1').fetchall():
    key=a['id'];settings=json.loads(a['settings']);st=json.loads(a['state'])
-   if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
+   if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank','combo_reverse'):
     from .follow_strategy import tick_one
     tick_one(c,a,history,cfg,now);continue
    if c.execute('SELECT 1 FROM custom_decisions WHERE strategy=? AND target_draw=?',(key,target)).fetchone():continue
@@ -179,7 +182,7 @@ def catalog(db):
   settings=json.loads(a['settings']);last=[{'reason':last_by[a['id']]}] if a['id'] in last_by else []
   stats=copy.deepcopy(summaries.get(a['id'],summary([],a['initial_balance'])))
   stats.update(initial_balance=a['initial_balance']/100,balance=a['initial_balance']/100+stats['net']-stats['pending_stake'])
-  if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank'):
+  if settings.get('strategy_type') in ('hourly','majority','previous','single','algorithm','algorithm_rank','combo_reverse'):
    from .follow_strategy import rule_text,next_stake,adjusts_amount
    settings={**{'win_limit':5 if settings['strategy_type']=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0},**settings};settings={**({'win_decrement_cents':0,'stake_floor':'market','max_increase_steps':0,'max_decrease_steps':0} if settings['strategy_type']=='single' else {}),**settings};state=json.loads(a['state']);stats['next_stake']=(state.get('next_stake',settings['base_cents']) if adjusts_amount(settings) else next_stake(settings,state.get('losses',0)))/100
    rows.append({'id':a['id'],'name':a['name'],'enabled':bool(a['enabled']),'paused':False,'editable':True,'editor_type':settings['strategy_type'],'settings':settings,'status':'已停用' if not a['enabled'] else '等待开奖' if stats['pending_stake']>0 else '连胜暂停至'+str(state['pause_until'])+'期' if state.get('pause_until',0)>latest_id else last[0]['reason'] if last else '等待下一期检查','rules':rule_text(settings),'win_streak':state.get('win_streak',0),'pause_until':state.get('pause_until',0),'stats':stats,'follow_start':state.get('follow_start'),'follow_end':state.get('follow_end'),'follow_direction':state.get('direction')});continue

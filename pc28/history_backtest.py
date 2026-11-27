@@ -29,7 +29,7 @@ def selection(service,key):
  rows=service.db.query('SELECT id,name,settings FROM custom_strategies WHERE id=?',(key,))
  if not rows:raise ValueError('策略不存在')
  row=rows[0];settings=json.loads(row['settings']);kind=settings.get('strategy_type','reversal')
- if kind not in ('reversal','majority','hourly','previous','single','algorithm','algorithm_rank'):raise ValueError('该策略类型无法识别')
+ if kind not in ('reversal','majority','hourly','previous','single','algorithm','algorithm_rank','combo_reverse'):raise ValueError('该策略类型无法识别')
  snapshot={'id':key,'name':row['name'],'kind':kind,'settings':settings,'odds':cfg['odds'],'selections':[],'snapshot_at':utcnow()}
  if kind in ('algorithm','algorithm_rank'):snapshot['hidden_algorithms']=sorted(service.algorithm_hall.hidden())
  return snapshot
@@ -126,6 +126,9 @@ def source_window(raw,conflicts,as_of,months=3,range_spec=None):
  return rows,coverage
 
 def replay(rows,snapshot,on_progress=None):
+ if snapshot['kind']=='previous' and snapshot['settings'].get('previous_types') is not None:
+  from .previous_types import replay_selected
+  return replay_selected(rows,snapshot,on_progress)
  cfg=snapshot['settings'];kind=snapshot['kind'];odds=snapshot['odds'];initial=money(cfg['initial_balance']);balance=peak=initial;daily=0;day='';orders=[];skips=Counter();hour_cache={};state={'cycle':0,'losses':0,'attempt':0,'win_streak':0,'pause_until':0};last_direction=None;curve=[];equity=0
  stored={r['month']:r for r in snapshot.get('selections',[])}
  hidden=set(snapshot.get('hidden_algorithms',[]))
@@ -135,7 +138,8 @@ def replay(rows,snapshot,on_progress=None):
   time=r['_time'];utcday=time.astimezone(timezone.utc).date().isoformat()
   if day!=utcday:day=utcday;daily=0
   if not i:skips['观察窗口预热']+=1;continue
-  history=rows[max(0,i-(57 if kind=='algorithm_rank' else 1001)):i];prev=history[-1];target=r['id'];decision=time-timedelta(microseconds=1)
+  history_length=57 if kind=='algorithm_rank' else max(1001,cfg.get('run_length',0)+cfg.get('prior_opposite_draws',0)+1) if kind=='combo_reverse' else 1001
+  history=rows[max(0,i-history_length):i];prev=history[-1];target=r['id'];decision=time-timedelta(microseconds=1)
   if ranker is not None:ranker.update([v for v in history if v.get('verification') in VERIFIED])
   rest_reason=maintenance.block_reason(prev,decision,snapshot.get('maintenance_guard',True),time)
   if rest_reason:
@@ -173,6 +177,11 @@ def replay(rows,snapshot,on_progress=None):
    direction=s.direction;stake=state['stake'] if active else s.base_cents;max_bets=s.max_bets;step=state['attempt']+1 if active else 1
   elif kind=='single':
    direction=cfg['direction'];stake=state.get('next_stake',cfg['base_cents']) if adjusts_amount(cfg) else next_stake(cfg,state['losses']);step=state['losses']+1
+  elif kind=='combo_reverse':
+   from .combo_reverse import signal as combo_signal
+   direction,why=combo_signal(history,cfg,state)
+   if not direction:skips[why]+=1;continue
+   stake=state.get('next_stake',cfg['base_cents']);step=state['attempt']+1
   elif kind=='previous':
    direction=previous_direction(prev,cfg['axis']);stake=state.get('next_stake',cfg['base_cents']);step=state['attempt']+1
   elif kind in ('algorithm','algorithm_rank'):
@@ -198,6 +207,11 @@ def replay(rows,snapshot,on_progress=None):
     state.update(direction=direction,follow_end=hour+timedelta(hours=cfg['follow_hours']),follow_start=hour,cycle=state['cycle']+1,attempt=0,losses=0)
    stake=next_stake(cfg,state['losses']);step=state['attempt']+1
   if kind!='reversal' and cfg.get('direction') and direction!=cfg['direction']:skips['入场方向不符合指定方向']+=1;continue
+  if kind=='combo_reverse':
+   from .combo_reverse import end_on_amount
+   if end_on_amount(state,cfg,stake,prev['id']):
+    skips['单笔达到结束本轮金额，重新观察']+=1
+    continue
   risk=risk_reason(balance,peak,stake,daily,cfg,odds)
   if risk:skips[risk]+=1;continue
   if algorithm_state is not None:state=algorithm_state
@@ -211,6 +225,10 @@ def replay(rows,snapshot,on_progress=None):
   if kind=='reversal':
    state['losses']=0 if hit else state['losses']+1;state['stake']=s.base_cents if hit else rounded_ratio(stake,s.multiplier_hundredths);end_round=(s.max_losses>0 and state['losses']>=s.max_losses) or step>=s.max_bets or win_stop;state['active']=not end_round
    if end_round:state.update(waiting_rearm=not win_stop and (s.max_losses>0 and state['losses']>=s.max_losses) and cfg.get('round_restart','condition_reset')=='condition_reset',rearm_strategy=asdict(s))
+  elif kind=='combo_reverse':
+   from .combo_reverse import settled as combo_settled
+   combo_settled(state,cfg,paid['outcome'],stake,step,target)
+   end_round=not state.get('combo_active')
   elif adjusts_amount(cfg):
    state['next_stake']=previous_amount(stake,paid['outcome'],cfg,state)
    state['losses']=0 if paid['outcome']=='win' else state['losses']+int(paid['outcome']=='loss')
@@ -252,10 +270,12 @@ def execute(service,prepared,on_progress=None):
   result['amount_counting']='cumulative-v2'
   result['notes'].append('加额与减额分别按已结算订单累计，输赢交替和退本金不清零；任一项达到上限后下一单恢复基础金额，两项同时重新计数。')
  result['range']=spec
+ if snap['kind']=='previous' and snap['settings'].get('previous_types') is not None:result['notes'].append('同一策略内各下单类型独立计算金额与加减额，共用本金和整体资金风控；同一期可有多笔订单。未下单期数按去重期开奖统计，跳过原因按类型分别计数。')
  result['notes'][0]='仅使用本次所选范围的本地有效开奖记录；单次20—100000期，预热不读取范围外数据。'
  folder=service.root/'data/exports';folder.mkdir(parents=True,exist_ok=True)
  columns=['target_draw','beijing_time','direction','stake','credit','pnl','hit','outcome','total','cycle','step','max_bets','round_end','pause_until','cutoff_draw','equity']
  if snap['kind']=='algorithm':columns.extend(['algorithm_ids','algorithm_votes'])
+ if snap['kind']=='previous' and snap['settings'].get('previous_types') is not None:columns.append('previous_type')
  with (folder/(prefix+'.csv')).open('w',encoding='utf-8-sig',newline='') as f:
   w=csv.DictWriter(f,fieldnames=columns);w.writeheader()
   for o in orders:

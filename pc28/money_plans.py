@@ -7,6 +7,7 @@ SCHEMA='''
 CREATE TABLE IF NOT EXISTS money_plans(id INTEGER PRIMARY KEY,name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,version INTEGER NOT NULL DEFAULT 1,settings TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0,created TEXT NOT NULL,updated TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS money_plan_versions(plan_id INTEGER,version INTEGER,settings TEXT NOT NULL,created TEXT NOT NULL,PRIMARY KEY(plan_id,version));
 CREATE TABLE IF NOT EXISTS money_plan_states(subscription_id INTEGER PRIMARY KEY,plan_id INTEGER NOT NULL,version INTEGER NOT NULL,last_order INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS money_plan_type_states(subscription_id INTEGER NOT NULL,previous_type TEXT NOT NULL,plan_id INTEGER NOT NULL,version INTEGER NOT NULL,last_order INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL,PRIMARY KEY(subscription_id,previous_type));
 '''
 
 def initialize(c):
@@ -111,19 +112,33 @@ class AwaitingSettlement(ValueError):
  pass
 
 
-def quote(c,subscription):
- plan=available(c,subscription['money_plan_id']);sid=subscription['id'];raw=c.execute('SELECT * FROM money_plan_states WHERE subscription_id=?',(sid,)).fetchone()
- # A confirmed gap keeps its exposure but can be bypassed for sizing.
+def quote(c,subscription,previous_type=None):
+ plan=available(c,subscription['money_plan_id']);sid=subscription['id']
+ if previous_type is not None:
+  from .previous_types import TYPES
+  if previous_type not in TYPES:raise ValueError('无效的上期跟随类型')
+  raw=c.execute('SELECT * FROM money_plan_type_states WHERE subscription_id=? AND previous_type=?',(sid,previous_type)).fetchone()
+ else:raw=c.execute('SELECT * FROM money_plan_states WHERE subscription_id=?',(sid,)).fetchone()
+ # Untyped historical open orders conservatively block all newly split types.
+ scope=" AND (json_extract(b.money_plan_snapshot,'$.previous_type')=? OR json_extract(b.money_plan_snapshot,'$.previous_type') IS NULL)" if previous_type is not None else ''
+ args=(sid,previous_type) if previous_type is not None else (sid,)
  unresolved=c.execute("""SELECT 1 FROM robot_outbox b LEFT JOIN member_orders o ON o.outbox_id=b.id
  LEFT JOIN robot_execution e ON e.outbox_id=b.id WHERE b.subscription_id=? AND b.is_test=0 AND
- (o.status='pending' OR o.id IS NULL AND (e.status IN ('unconfirmed','submitted','awaiting','executed') OR b.status IN ('pending','retry','sending','sent') AND COALESCE(e.status,'') NOT IN ('rejected','failed','timeout','expired','cancelled'))) LIMIT 1""",(sid,)).fetchone()
+ (o.status='pending' OR o.id IS NULL AND (e.status IN ('unconfirmed','submitted','awaiting','executed') OR b.status IN ('pending','retry','sending','sent') AND COALESCE(e.status,'') NOT IN ('rejected','failed','timeout','expired','cancelled')))"""+scope+' LIMIT 1',args).fetchone()
  if unresolved:raise AwaitingSettlement('上一笔执行或结算尚未确认，金额进度等待核对')
+ scope=" AND json_extract(b.money_plan_snapshot,'$.previous_type')=?" if previous_type is not None else ''
  s=json.loads(plan['settings'])
  if not raw or raw['plan_id']!=plan['id'] or raw['version']!=plan['version']:
-  last=c.execute('SELECT COALESCE(MAX(o.id),0) FROM member_orders o JOIN robot_outbox b ON b.id=o.outbox_id WHERE b.subscription_id=?',(sid,)).fetchone()[0];state={'next_cents':s['base_cents'],'increases':0,'decreases':0}
+  last=c.execute('SELECT COALESCE(MAX(o.id),0) FROM member_orders o JOIN robot_outbox b ON b.id=o.outbox_id WHERE b.subscription_id=?'+scope,args).fetchone()[0];state={'next_cents':s['base_cents'],'increases':0,'decreases':0}
  else:
   last=raw['last_order'];state=json.loads(raw['state'])
-  for order in c.execute("SELECT o.* FROM member_orders o JOIN robot_outbox b ON b.id=o.outbox_id WHERE b.subscription_id=? AND o.id>? AND o.status IN ('settled','void') ORDER BY o.id",(sid,last)).fetchall():
+  query_args=(sid,last,previous_type) if previous_type is not None else (sid,last)
+  for order in c.execute("SELECT o.* FROM member_orders o JOIN robot_outbox b ON b.id=o.outbox_id WHERE b.subscription_id=? AND o.id>? AND o.status IN ('settled','void')"+scope+' ORDER BY o.id',query_args).fetchall():
    state=advance(state,s,order);last=order['id']
- c.execute('INSERT INTO money_plan_states VALUES(?,?,?,?,?) ON CONFLICT(subscription_id) DO UPDATE SET plan_id=excluded.plan_id,version=excluded.version,last_order=excluded.last_order,state=excluded.state',(sid,plan['id'],plan['version'],last,json.dumps(state)))
- return state['next_cents'],json.dumps({'id':plan['id'],'name':plan['name'],'version':plan['version'],'settings':s,'state':state},ensure_ascii=False)
+ if previous_type is not None:
+  c.execute('INSERT INTO money_plan_type_states VALUES(?,?,?,?,?,?) ON CONFLICT(subscription_id,previous_type) DO UPDATE SET plan_id=excluded.plan_id,version=excluded.version,last_order=excluded.last_order,state=excluded.state',(sid,previous_type,plan['id'],plan['version'],last,json.dumps(state)))
+ else:
+  c.execute('INSERT INTO money_plan_states VALUES(?,?,?,?,?) ON CONFLICT(subscription_id) DO UPDATE SET plan_id=excluded.plan_id,version=excluded.version,last_order=excluded.last_order,state=excluded.state',(sid,plan['id'],plan['version'],last,json.dumps(state)))
+ snapshot={'id':plan['id'],'name':plan['name'],'version':plan['version'],'settings':s,'state':state}
+ if previous_type is not None:snapshot['previous_type']=previous_type
+ return state['next_cents'],json.dumps(snapshot,ensure_ascii=False)

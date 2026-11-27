@@ -12,7 +12,7 @@ from . import router,trend_strategy,custom_strategy
 TABLES={'legacy':'orders','trend':'trend_orders','custom':'custom_orders'}
 SCHEMA='''
 CREATE TABLE IF NOT EXISTS strategy_signal_versions(strategy TEXT,version TEXT,settings TEXT NOT NULL,created TEXT NOT NULL,PRIMARY KEY(strategy,version));
-CREATE TABLE IF NOT EXISTS strategy_signals(id INTEGER PRIMARY KEY,strategy TEXT NOT NULL,version TEXT NOT NULL,target_draw INTEGER NOT NULL,cutoff_draw INTEGER NOT NULL,created TEXT NOT NULL,direction TEXT NOT NULL,stake INTEGER NOT NULL DEFAULT 10000,status TEXT NOT NULL DEFAULT 'pending',hit INTEGER,pnl INTEGER,outcome TEXT,total INTEGER,settled TEXT,cycle INTEGER,step INTEGER,odds_json TEXT NOT NULL,evidence TEXT NOT NULL,source_engine TEXT NOT NULL,source_id INTEGER NOT NULL,UNIQUE(source_engine,source_id),UNIQUE(strategy,target_draw));
+CREATE TABLE IF NOT EXISTS strategy_signals(id INTEGER PRIMARY KEY,strategy TEXT NOT NULL,version TEXT NOT NULL,target_draw INTEGER NOT NULL,cutoff_draw INTEGER NOT NULL,created TEXT NOT NULL,direction TEXT NOT NULL,stake INTEGER NOT NULL DEFAULT 10000,status TEXT NOT NULL DEFAULT 'pending',hit INTEGER,pnl INTEGER,outcome TEXT,total INTEGER,settled TEXT,cycle INTEGER,step INTEGER,odds_json TEXT NOT NULL,evidence TEXT NOT NULL,source_engine TEXT NOT NULL,source_id INTEGER NOT NULL,UNIQUE(source_engine,source_id),UNIQUE(strategy,target_draw,direction));
 CREATE INDEX IF NOT EXISTS signal_strategy_status ON strategy_signals(strategy,status,target_draw);
 CREATE INDEX IF NOT EXISTS signal_statistics_covering ON strategy_signals(strategy,status,hit,pnl,created);
 '''
@@ -21,6 +21,8 @@ def initialize(db):
  with db.tx() as c:
   for sql in SCHEMA.split(';'):
    if sql.strip():c.execute(sql)
+  from .order_direction_migration import migrate
+  migrate(c,'strategy_signals')
 
 def neutral(settings):
  s=copy.deepcopy(settings)
@@ -30,6 +32,7 @@ def neutral(settings):
  if 'base_cents' in s:s['base_cents']=10000
  if 'multiplier_hundredths' in s:s['multiplier_hundredths']=100
  if 'stake_mode' in s:s['stake_mode']='fixed'
+ if s.get('strategy_type')=='combo_reverse':s.update(loss_stages=[],round_stop_cents=0)
  for k in list(s):
   if k.startswith(('low_','high_')) and k.endswith('_cents'):s[k]=0
  if 'fixed' in s:

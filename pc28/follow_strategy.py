@@ -9,7 +9,7 @@ from .trend_strategy import risk_reason,signal,progress
 from .strategy_capital import sync_capital
 from .algorithm_hall import BY_ID,VERIFIED,predict,ranked_algorithms,RollingRanking,ALGORITHMS_PER_AXIS
 PREVIOUS_AMOUNT_KINDS=('previous','algorithm','algorithm_rank')
-KINDS=('hourly','majority','previous','single','algorithm','algorithm_rank');BJ=ZoneInfo('Asia/Shanghai')
+KINDS=('hourly','majority','previous','single','algorithm','algorithm_rank','combo_reverse');BJ=ZoneInfo('Asia/Shanghai')
 def defaults(cfg,kind,axis='size'):
  value={'strategy_type':kind,'axis':axis,'direction':None,'win_limit':5 if kind=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0,'observe_hours':2,'hour_difference':5,'follow_hours':2,'lookback':20,'base_cents':10000,'loss_increment_cents':0,'multiplier_hundredths':100,'stake_mode':'fixed','max_losses':3,'initial_balance':cfg['simulation']['initial_balance'],**{k:cfg['simulation'][k] for k in ('daily_loss_limit','max_drawdown','max_stake')}}
  if kind=='single':value.update(direction='单',axis='parity',stake_mode='fixed',win_limit=0,base_cents=cfg['simulation']['fixed']['base_cents'])
@@ -17,7 +17,11 @@ def defaults(cfg,kind,axis='size'):
  if kind in PREVIOUS_AMOUNT_KINDS:value.update(win_decrement_cents=0,stake_floor='market',max_stake=20000,win_limit=0,max_increase_steps=0,max_decrease_steps=0)
  if kind in (*PREVIOUS_AMOUNT_KINDS,'single'):value.update(amount_bands.ZERO)
  if kind=='algorithm_rank':value.update(rank_position=1,rank_window=20)
+ if kind=='previous':value['previous_types']=None
  if kind=='algorithm':value.update(algorithm_follow_draws=20,algorithm_difference_limit=0,algorithm_cooldown_rounds=0)
+ if kind=='combo_reverse':
+  from .combo_reverse import FILTER_DEFAULTS
+  value.update(axis='combo',run_length=3,follow_draws=5,stake_mode='additive',max_losses=0,loss_stages=None,**FILTER_DEFAULTS)
  return value
 
 def adjusts_amount(settings):return settings.get('strategy_type') in PREVIOUS_AMOUNT_KINDS or (settings.get('strategy_type')=='single' and settings.get('stake_mode')=='adjust')
@@ -93,6 +97,15 @@ def previous_amount(stake,outcome,settings,state=None):
 
 def validate(cfg,value):
  if not isinstance(value,dict):raise ValueError('策略参数必须是对象')
+ if value.get('strategy_type')=='previous':
+  from .previous_types import validate_types
+  value={'previous_types':None,**value}
+  if value['previous_types'] is not None:
+   validate_types(value['previous_types'])
+   value={**value,'direction':None}
+ if value.get('strategy_type')=='combo_reverse':
+  from .combo_reverse import FILTER_DEFAULTS
+  value={'loss_stages':None,**FILTER_DEFAULTS,**value}
  value={**{'direction':None,'win_limit':5 if value.get('strategy_type')=='majority' else 0,'pause_draws':20,'win_loss_difference_limit':0},**value}
  win_pause.validate(value['win_limit'],value['pause_draws'],value.get('win_loss_difference_limit',0))
  if value.get('strategy_type')=='single':value={**{'win_decrement_cents':0,'stake_floor':'market','max_increase_steps':0,'max_decrease_steps':0},**value}
@@ -103,7 +116,22 @@ def validate(cfg,value):
  expected=set(defaults(cfg,value.get('strategy_type','hourly')))
  if set(value)!=expected:raise ValueError('跟随策略参数不完整或包含未知字段')
  direction=value['direction'];axis=value['axis'];single=value['strategy_type']=='single'
- if value['strategy_type'] not in KINDS or axis not in (('size','parity','combo','a','b','c') if value['strategy_type']=='previous' else ('size','parity','combo') if single else ('size','parity')):raise ValueError('策略类型或维度无效')
+ if value['strategy_type'] not in KINDS or axis not in (('combo',) if value['strategy_type']=='combo_reverse' else ('size','parity','combo','a','b','c') if value['strategy_type']=='previous' else ('size','parity','combo') if single else ('size','parity')):raise ValueError('策略类型或维度无效')
+ if value['strategy_type']=='combo_reverse':
+  if type(value['prior_opposite_draws']) is not int or not 0<=value['prior_opposite_draws']<=1000:raise ValueError('连续组合前排除相反组合的期数须为0—1000，0表示关闭')
+  if type(value['round_stop_cents']) is not int or not 0<=value['round_stop_cents']<=1000000000000:raise ValueError('单笔达额结束本轮金额须为非负整数分，0表示关闭')
+  from .combo_reverse import OPPOSITE
+  combos=value['entry_combos']
+  if not isinstance(combos,list) or not 1<=len(combos)<=4 or any(not isinstance(x,str) or x not in OPPOSITE for x in combos) or len(set(combos))!=len(combos):raise ValueError('请至少选择一种入场组合，不能重复或包含未知组合')
+  from .combo_reverse import validate_stages
+  validate_stages(value['loss_stages'])
+  for field in ('confirmation_filter','trend_filter'):
+   if type(value[field]) is not bool:raise ValueError('过滤开关须为布尔值')
+  if type(value['trend_lookback']) is not int or not 2<=value['trend_lookback']<=1000:raise ValueError('趋势观察期数须为2—1000')
+  if type(value['trend_threshold_percent']) is not int or not 51<=value['trend_threshold_percent']<=100:raise ValueError('强趋势占比阈值须为51—100%的整数')
+  for field in ('run_length','follow_draws'):
+   if type(value[field]) is not int or not 1<=value[field]<=1000:raise ValueError('连续次数及最多下注期数须为1—1000')
+  if direction is not None or value['stake_mode'] not in ('additive','multiply'):raise ValueError('组合连开反买须自动选择方向，并使用固定加额或比例加额')
  if single or direction is not None:
   if not isinstance(direction,str) or DIRECTION_AXES.get(direction)!=axis:raise ValueError('请选择与策略维度匹配的开单方向')
  if value['strategy_type']=='algorithm_rank':
@@ -132,6 +160,12 @@ def validate(cfg,value):
   if type(value['win_decrement_cents'])!=int or value['win_decrement_cents']<0 or value['stake_floor'] not in ('base','market'):raise ValueError('赢后减额或最低金额设置无效')
  return copy.deepcopy(value)
 def save(service,body):
+ if 'previous_types' in body:
+  body=copy.deepcopy(body)
+  if not isinstance(body.get('settings'),dict) or body['settings'].get('strategy_type')!='previous':raise ValueError('多选下单类型仅适用于上期跟随策略')
+  from .previous_types import validate_types
+  validate_types(body['previous_types'])
+  body['settings']['previous_types']=body.pop('previous_types')
  from .strategy_delete import require_available
  require_available(service.db,body.get("id"))
  name=body.get('name','')
@@ -139,19 +173,23 @@ def save(service,body):
  value=validate(service.cfg,body.get('settings'));key=body.get('id')
  with service.lock,service.db.tx() as c:
   require_available(service.db,body.get("id"))
-  if key:
-   old=c.execute('SELECT * FROM custom_strategies WHERE id=?',(key,)).fetchone()
-   if not old or json.loads(old['settings']).get('strategy_type')!=value['strategy_type']:raise ValueError('策略不存在或类型不匹配')
-   if old['enabled']:raise ValueError('请先停用策略再编辑参数')
-   if c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone():raise ValueError('请等待已有订单结算后再编辑')
-   state={'cycle':json.loads(old['state']).get('cycle',0)+1}
-   c.execute('UPDATE custom_strategies SET name=?,settings=?,state=? WHERE id=?',(name.strip(),json.dumps(value,ensure_ascii=False),json.dumps(state),key))
-   sync_capital(c,key,value['initial_balance'])
-  else:
-   if c.execute('SELECT COUNT(*) FROM custom_strategies WHERE id NOT IN (SELECT id FROM deleted_strategies)').fetchone()[0]>=100:raise ValueError('最多添加100条策略')
-   key='custom_'+uuid.uuid4().hex;initial=money(value['initial_balance'])
-   c.execute('INSERT INTO custom_strategies(id,name,settings,balance,initial_balance,peak,created) VALUES(?,?,?,?,?,?,?)',(key,name.strip(),json.dumps(value,ensure_ascii=False),initial,initial,initial,utcnow()))
-  c.execute('INSERT INTO strategy_edits(strategy,created,settings) VALUES(?,?,?)',(key,utcnow(),json.dumps({'name':name.strip(),'settings':value},ensure_ascii=False)))
+  return save_in_transaction(service,c,body,value)
+
+def save_in_transaction(service,c,body,value):
+ name=body['name'];key=body.get('id')
+ if key:
+  old=c.execute('SELECT * FROM custom_strategies WHERE id=?',(key,)).fetchone()
+  if not old or json.loads(old['settings']).get('strategy_type')!=value['strategy_type']:raise ValueError('策略不存在或类型不匹配')
+  if old['enabled']:raise ValueError('请先停用策略再编辑参数')
+  if c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone():raise ValueError('请等待已有订单结算后再编辑')
+  state={'cycle':json.loads(old['state']).get('cycle',0)+1}
+  c.execute('UPDATE custom_strategies SET name=?,settings=?,state=? WHERE id=?',(name.strip(),json.dumps(value,ensure_ascii=False),json.dumps(state),key))
+  sync_capital(c,key,value['initial_balance'])
+ else:
+  if c.execute('SELECT COUNT(*) FROM custom_strategies WHERE id NOT IN (SELECT id FROM deleted_strategies)').fetchone()[0]>=100:raise ValueError('最多添加100条策略')
+  key='custom_'+uuid.uuid4().hex;initial=money(value['initial_balance'])
+  c.execute('INSERT INTO custom_strategies(id,name,settings,balance,initial_balance,peak,created) VALUES(?,?,?,?,?,?,?)',(key,name.strip(),json.dumps(value,ensure_ascii=False),initial,initial,initial,utcnow()))
+ c.execute('INSERT INTO strategy_edits(strategy,created,settings) VALUES(?,?,?)',(key,utcnow(),json.dumps({'name':name.strip(),'settings':value},ensure_ascii=False)))
  return {'ok':True,'id':key}
 def next_stake(settings,losses):
  base=settings['base_cents']
@@ -160,11 +198,14 @@ def next_stake(settings,losses):
  for _ in range(losses):base=rounded_ratio(base,settings['multiplier_hundredths'])
  return base
 def settle_one(c,o,r,a):
- plan=json.loads(o['strategy_json']);settings=plan['settings'];state=json.loads(a['state']);hit=direction_hits(o['direction'],r['size'],r['parity'],r);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit'];losses,reset=progress(state.get('losses',0),hit,settings['max_losses'])
+ plan=json.loads(o['strategy_json']);settings=plan['settings'];root=json.loads(a['state']);selection=plan.get('previous_type');state=root.setdefault('type_states',{}).get(selection,{}) if selection else root;hit=direction_hits(o['direction'],r['size'],r['parity'],r);paid=settlement(o['stake'],o['direction'],r['total'],hit,json.loads(o['odds_json']));balance=a['balance']+paid['credit'];losses,reset=progress(state.get('losses',0),hit,settings['max_losses'])
  if adjusts_amount(settings):
   losses=0 if paid['outcome']=='win' else state.get('losses',0)+int(paid['outcome']=='loss')
   state['next_stake']=previous_amount(o['stake'],paid['outcome'],settings,state)
  state.update(losses=losses,last_settled_draw=o['target_draw'],last_direction=o['direction'],attempt=o['step'])
+ if settings['strategy_type']=='combo_reverse':
+  from .combo_reverse import settled
+  settled(state,settings,paid['outcome'],o['stake'],o['step'],o['target_draw'])
  if settings['strategy_type']=='algorithm':settle_algorithm_round(state,settings,paid['outcome'],o['target_draw'])
  if settings['strategy_type'] in ('majority','single') and not adjusts_amount(settings):
   if reset:state['cycle']=state.get('cycle',1)+1
@@ -172,7 +213,8 @@ def settle_one(c,o,r,a):
  if (state.get('difference_paused',False) or state.get('pause_until',0)>o['target_draw']) and settings['strategy_type']=='hourly':state.update(active=False,follow_end=None)
  c.execute("UPDATE custom_orders SET status='settled',pnl=?,hit=?,outcome=?,total=?,settled=? WHERE id=?",(paid['pnl'],int(hit),paid['outcome'],r['total'],utcnow(),o['id']))
  c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(o['strategy'],o['id'],utcnow(),'settle',paid['credit'],balance))
- c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?),state=? WHERE id=?',(balance,balance,json.dumps(state,ensure_ascii=False),o['strategy']))
+ if selection:root['type_states'][selection]=state
+ c.execute('UPDATE custom_strategies SET balance=?,peak=MAX(peak,?),state=? WHERE id=?',(balance,balance,json.dumps(root,ensure_ascii=False),o['strategy']))
 def hourly_signal(history,hour,settings,known_at=None):
  """Use only fully closed Beijing hours, with contiguous raw IDs and boundary coverage."""
  hour=hour.astimezone(BJ).replace(minute=0,second=0,microsecond=0);start=hour-timedelta(hours=settings['observe_hours']);known_at=known_at or hour
@@ -204,22 +246,33 @@ def target_time(c,target):
   plan=json.loads(r[0]);t=datetime.fromisoformat(plan['next_draw_at'])
   return t if int(plan['next_draw_id'])==target and t.tzinfo else None
  except (KeyError,ValueError,TypeError):return None
-def tick_one(c,a,history,cfg,now):
+def tick_one(c,a,history,cfg,now,selection_type=None):
  settings=json.loads(a['settings']);state=json.loads(a['state']);latest=history[-1];target=latest['id']+1;key=a['id']
- if c.execute('SELECT 1 FROM custom_decisions WHERE strategy=? AND target_draw=?',(key,target)).fetchone():return
+ if settings.get('strategy_type')=='previous' and settings.get('previous_types') is not None and selection_type is None:
+  from .previous_types import tick_selected
+  return tick_selected(c,a,history,cfg,now)
+ decision_key=key+'::'+selection_type if selection_type else key
+ if c.execute('SELECT 1 FROM custom_decisions WHERE strategy=? AND target_draw=?',(decision_key,target)).fetchone():return
  pause_reason=win_pause.paused(state,target)
  c.execute('UPDATE custom_strategies SET state=? WHERE id=?',(json.dumps(state,ensure_ascii=False),key))
- if pause_reason:c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(key,target,utcnow(),'skip',pause_reason));return
+ if pause_reason:c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(decision_key,target,utcnow(),'skip',pause_reason));return
  rest_reason=maintenance.live_guard(c,latest,now,cfg)
- if rest_reason:c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(key,target,utcnow(),'skip',rest_reason));return
+ if rest_reason:c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(decision_key,target,utcnow(),'skip',rest_reason));return
  reason='';transient=False;direction=None;ratio=None;evidence=[];algorithm_state=None
  if not latest['draw_utc']:reason='开奖时区未确认'
  else:
   age=(now-datetime.fromisoformat(latest['draw_utc'])).total_seconds();delay=(now-datetime.fromisoformat(latest['first_seen'])).total_seconds()
   if age< -30 or age>cfg['simulation'].get('max_decision_age_seconds',120) or delay>cfg['simulation']['max_received_delay_seconds']:reason='数据超过下单时窗'
  if c.execute('SELECT 1 FROM conflicts WHERE resolved=0 LIMIT 1').fetchone():reason='存在待核验的数据冲突'
- if c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone():reason='等待上一单结算'
+ pending=c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending' AND json_extract(strategy_json,'$.previous_type')=?",(key,selection_type)).fetchone() if selection_type else c.execute("SELECT 1 FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone()
+ if pending:reason='等待上一单结算'
  if settings['strategy_type']=='single':direction=settings['direction'];evidence=[{'cutoff_draw':latest['id'],'fixed_direction':direction}]
+ elif settings['strategy_type']=='combo_reverse':
+  if not reason:
+   from .combo_reverse import signal as combo_signal
+   direction,why=combo_signal(history,settings,state)
+   evidence=[{'cutoff_draw':latest['id'],'reason':why}]
+   if not direction:reason=why
  elif settings['strategy_type']=='previous':direction=previous_direction(latest,settings['axis']);evidence=[{'cutoff_draw':latest['id'],'direction':direction}]
  elif settings['strategy_type'] in ('algorithm','algorithm_rank'):
   if not reason:
@@ -246,23 +299,49 @@ def tick_one(c,a,history,cfg,now):
     else:reason=why
  if direction and settings.get('direction') and direction!=settings['direction']:reason=reason or '入场方向不符合指定的'+settings['direction']+'，本期不下单'
  stake=state.get('next_stake',settings['base_cents']) if adjusts_amount(settings) else next_stake(settings,state.get('losses',0))
+ if settings['strategy_type']=='combo_reverse':stake=state.get('next_stake',settings['base_cents'])
  if adjusts_amount(settings) and settings.get('loss_increment_cents',0)==0 and settings.get('win_decrement_cents',0)==0 and not any(settings.get(k,0) for k in amount_bands.FIELDS):
   stake=settings['base_cents']
  day=now.astimezone(timezone.utc).date().isoformat();daily=c.execute("SELECT COALESCE(SUM(pnl),0) FROM custom_orders WHERE strategy=? AND status='settled' AND substr(settled,1,10)=?",(key,day)).fetchone()[0]
+ if selection_type:daily-=c.execute("SELECT COALESCE(SUM(stake),0) FROM custom_orders WHERE strategy=? AND status='pending'",(key,)).fetchone()[0]
+ if not reason and settings['strategy_type']=='combo_reverse':
+  from .combo_reverse import end_on_amount
+  if end_on_amount(state,settings,stake,latest['id']):
+   c.execute('UPDATE custom_strategies SET state=? WHERE id=?',(json.dumps(state,ensure_ascii=False),key))
+   c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(decision_key,target,utcnow(),'skip',f"下一笔{stake/100:g}U达到{settings['round_stop_cents']/100:g}U结束阈值；本轮结束，重新观察"))
+   return
  reason=reason or risk_reason(a['balance'],a['peak'],stake,daily,settings,cfg['odds'])
  if reason:
   c.execute('UPDATE custom_strategies SET state=? WHERE id=?',(json.dumps(state,ensure_ascii=False),key))
-  if not transient:c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(key,target,utcnow(),'skip',reason))
+  if not transient:c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(decision_key,target,utcnow(),'skip',reason))
   return
  if algorithm_state is not None:state=algorithm_state
- cycle=state.setdefault('cycle',1);step=state.get('attempt',0)+1 if settings['strategy_type'] in ('hourly',*PREVIOUS_AMOUNT_KINDS) else state.get('losses',0)+1
+ cycle=state.setdefault('cycle',1);step=state.get('attempt',0)+1 if settings['strategy_type'] in ('combo_reverse','hourly',*PREVIOUS_AMOUNT_KINDS) else state.get('losses',0)+1
  plan={'strategy_type':settings['strategy_type'],'settings':settings,'evidence':evidence,'follow_start':state.get('follow_start'),'follow_end':state.get('follow_end')}
+ if selection_type:plan['previous_type']=selection_type
  cur=c.execute("INSERT INTO custom_orders(strategy,target_draw,cutoff_draw,created,direction,ratio,stake,status,cycle,step,strategy_json,odds_json,restart_policy) VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?,?)",(key,target,latest['id'],utcnow(),direction,ratio,stake,cycle,step,json.dumps(plan,ensure_ascii=False),json.dumps(cfg['odds']),'follow'))
- balance=a['balance']-stake;c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(key,cur.lastrowid,utcnow(),'stake',-stake,balance));c.execute('UPDATE custom_strategies SET balance=?,state=? WHERE id=?',(balance,json.dumps(state,ensure_ascii=False),key));c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(key,target,utcnow(),'order',evidence[0]['reason'] if settings['strategy_type'] in ('algorithm','algorithm_rank') else '单边固定买'+direction if settings['strategy_type']=='single' else '跟随上一期'+direction if settings['strategy_type']=='previous' else '连续小时少数方向一致，进入跟随期' if settings['strategy_type']=='hourly' else '占优跟随；持平沿用上一笔方向'))
+ balance=a['balance']-stake;c.execute('INSERT INTO custom_ledger(strategy,order_id,created,kind,amount,balance) VALUES(?,?,?,?,?,?)',(key,cur.lastrowid,utcnow(),'stake',-stake,balance));c.execute('UPDATE custom_strategies SET balance=?,state=? WHERE id=?',(balance,json.dumps(state,ensure_ascii=False),key));c.execute('INSERT INTO custom_decisions VALUES(?,?,?,?,?)',(decision_key,target,utcnow(),'order',evidence[0]['reason'] if settings['strategy_type'] in ('algorithm','algorithm_rank') else '单边固定买'+direction if settings['strategy_type']=='single' else '跟随上一期'+direction if settings['strategy_type']=='previous' else '连续小时少数方向一致，进入跟随期' if settings['strategy_type']=='hourly' else '占优跟随；持平沿用上一笔方向'))
 
-def rule_text(s):return _rule_text(s)+(amount_bands.description(s) if adjusts_amount(s) else '')
+def rule_text(s):
+ text=_rule_text(s)+(amount_bands.description(s) if adjusts_amount(s) else '')
+ if s.get('strategy_type')=='combo_reverse':
+  text+='；连开前相反组合过滤：'+(f"连续组合开始前{s['prior_opposite_draws']}期不得出现相反组合" if s.get('prior_opposite_draws') else '关闭')
+  text+='；单笔达额结束本轮：'+(f"≥{s['round_stop_cents']/100:g}U，不下该笔并重新观察" if s.get('round_stop_cents') else '关闭')
+  text+='；入场组合：'+'、'.join(s.get('entry_combos',['大双','大单','小双','小单']))
+  if s.get('loss_stages') is not None:
+   text+='；阶段加额：'+('，'.join(f"亏损第{x['start']}—{x['end']}次加{x['value']/100:g}U" if x['mode']=='additive' else f"亏损第{x['start']}—{x['end']}次加{x['value']}%" for x in s['loss_stages']) or '不加额')+'；未覆盖阶段保持金额'
+  filters=[]
+  if s.get('confirmation_filter'):filters.append('单项反转确认')
+  if s.get('trend_filter'):filters.append(f"近{s.get('trend_lookback',20)}期反向大小及单双均≥{s.get('trend_threshold_percent',70)}%跳过")
+  text+='；入场过滤：'+('且'.join(filters) if filters else '关闭')
+ return text
 
 def _rule_text(s):
+ if s.get('strategy_type')=='previous' and s.get('previous_types') is not None:
+  from .previous_types import TYPES
+  return '上期跟随：'+'、'.join(TYPES[k] for k in s['previous_types'])+f"；同一策略，各类型独立金额与加减额；基础{s['base_cents']/100:g}U，赢减{s['win_decrement_cents']/100:g}U，亏加{s['loss_increment_cents']/100:g}U；组合仅匹配时跟随，退本金额不变；共用策略资金风控"
+ if s.get('strategy_type')=='combo_reverse' and s.get('loss_stages') is not None:return f"组合连续{s['run_length']}期后反买，锁定方向最多{s['follow_draws']}期；基础{s['base_cents']/100:g}U；中奖结束，退本保持金额且计入下注期数、不计亏损次数"
+ if s['strategy_type']=='combo_reverse':return f"组合连续{s['run_length']}期后反买，锁定方向最多{s['follow_draws']}期；基础{s['base_cents']/100:g}U；亏后"+(f"增加{s['loss_increment_cents']/100:g}U" if s['stake_mode']=='additive' else f"增加{s['multiplier_hundredths']-100}%并向上取整U")+'；中奖结束，退本保持金额且计入期数'
  axis={'size':'大小','parity':'单双','combo':'组合','a':'A球大小','b':'B球大小','c':'C球大小'}[s['axis']]
  if s['strategy_type']=='algorithm_rank':return f"每期按近{s['rank_window']}期胜率重排已上架{axis}算法，跟随第{s['rank_position']}名；同率按算法编号排序；基础{s['base_cents']/100:g}U，赢减{s['win_decrement_cents']/100:g}U，亏加{s['loss_increment_cents']/100:g}U"
  if s['strategy_type']=='algorithm':
