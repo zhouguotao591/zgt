@@ -140,10 +140,12 @@ def daily_reports(c, start, end):
     for label, count in [('大',draws['big']),('小',n-draws['big']),('单',draws['odd']),('双',n-draws['odd'])]:
         lines.append(f'{label}：{count} 期 · {count/n if n else 0:.2%}')
     enqueue(c, 'daily_ratio', date, '\n'.join(lines))
-    rows = c.execute("""SELECT o.target_draw,o.draw_time,COUNT(*) n,SUM(o.stake) stake,
-        SUM(o.pnl) pnl,SUM(o.pnl>0) wins FROM member_orders o
-        LEFT JOIN robot_execution e ON e.outbox_id=o.outbox_id
-        WHERE o.status='settled' AND o.pnl IS NOT NULL AND (e.outbox_id IS NULL OR e.status IN ('executed','draw_settled'))
+    rows = c.execute("""SELECT o.target_draw,o.draw_time,COUNT(*) n,SUM(o.settled_stake) stake,
+        SUM(o.pnl) pnl,SUM(o.pnl>0) wins FROM member_robot_orders o
+        WHERE o.status='settled' AND o.pnl IS NOT NULL AND NOT EXISTS(
+          SELECT 1 FROM member_order_items d JOIN robot_execution e ON e.outbox_id=d.outbox_id
+          WHERE d.user_id=o.user_id AND d.order_key=o.order_key AND d.status='settled'
+          AND e.status NOT IN ('executed','draw_settled'))
         AND julianday(o.draw_time)>=julianday(?) AND julianday(o.draw_time)<julianday(?)
         GROUP BY o.target_draw,o.draw_time ORDER BY julianday(o.draw_time),o.target_draw""",
         (start.isoformat(),end.isoformat())).fetchall()
@@ -158,7 +160,7 @@ def daily_reports(c, start, end):
         f'盈利金额：{net/100:+.2f} U', f'盈利比：{net/stake if stake else 0:.2%}',
         f'胜率：{wins/count if count else 0:.2%}', f'最大盈利金额：{peak/100:.2f} U',
         f'单日最大利润回撤：{drawdown/100:.2f} U',
-        '按开奖日期统计截至推送时已结算的有效会员订单明细。',
+        '按开奖日期统计已结算的机器人合并会员订单；同一会员多个机器人分别计单。',
         '盈利比=净盈利/下单金额；胜率=盈利订单数/订单数。',
         '最大盈利为当日累计净盈利峰值；回撤按每期开奖合计盈亏计算。'])
     enqueue(c, 'daily_profit', date, message)

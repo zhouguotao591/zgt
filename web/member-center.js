@@ -193,7 +193,7 @@ function toast(message) {
     const table=node('table'), head=table.createTHead().insertRow(), body=table.createTBody(), cards=node('div',null,'mc-order-cards');
     for(const label of ['期号','下单账号','机器人','开奖时间（北京时间）','方向 / 金额','状态','净收益','操作'])head.append(node('th',label));
     for(const r of rows) {
-      const direction=r.direction+' / '+amount(r.stake), state=statuses[r.status]||'—', pnl=amount(r.pnl);
+      const direction=(r.message||r.direction)+' / 合计'+amount(r.stake), state=r.outcome==='offset'?'全额对冲，无需下单':statuses[r.status]||'—', pnl=amount(r.pnl);
       const row=body.insertRow();
       for(const value of [r.target_draw,r.account_name,r.bot_name,time(r.draw_time),direction,state,pnl])row.append(node('td',value));
       const button=node('button','详情','secondary');
@@ -221,9 +221,10 @@ function toast(message) {
       const grid=node('div',null,'mc-metrics');
       fields(grid,[['订单编号','#'+r.id],['期号',r.target_draw],['下单账号',r.account_name],['机器人',r.bot_name],
         ['开奖时间（北京时间）',time(r.draw_time)],['记账时间（北京时间）',time(r.settled_at)],
-        ['开奖',result],['订单方向',r.direction],['推送金额',amount(r.stake)],['状态',statuses[r.status]||'—'],
-        ['结算倍数',r.odds_factor==null?'—':(r.odds_factor/100).toFixed(Number.isInteger(r.odds_factor)?2:3)+'×'],['返还',amount(r.credit)],['净收益',amount(r.pnl)]]);
+        ['开奖',result],['合并下单内容',r.message||r.direction],['推送金额',amount(r.stake)],['状态',statuses[r.status]||'—'],
+        ['结算倍数',r.detail_count>1?'各项独立结算':r.odds_factor==null?'—':(r.odds_factor/100).toFixed(Number.isInteger(r.odds_factor)?2:3)+'×'],['返还',amount(r.credit)],['净收益',amount(r.pnl)]]);
       content.replaceChildren(grid);
+      if(r.items?.length){const items=node('div');items.append(node('h3','策略及下单类型明细'));for(const item of r.items)items.append(node('p',(item.strategy_name||'历史策略')+' · '+item.direction+' '+amount(item.stake)+' · '+(statuses[item.status]||'—')+' · 净收益 '+amount(item.pnl)));content.append(items);}
       if(navigator.clipboard) {
         const copy=node('button','复制订单编号','secondary');
         copy.type='button';

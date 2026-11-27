@@ -42,6 +42,8 @@ def initialize(service):
    if key not in fields:c.execute('ALTER TABLE member_orders ADD COLUMN '+key+' INTEGER')
   for key,definition in (('original_stake','INTEGER'),('original_message','TEXT')):
    if key not in fields:c.execute('ALTER TABLE member_orders ADD COLUMN '+key+' '+definition)
+  from .member_order_groups import initialize as initialize_groups
+  initialize_groups(c)
   c.execute('CREATE INDEX IF NOT EXISTS member_orders_robot_risk ON member_orders(bot_id,status,id)')
   c.execute('UPDATE member_orders SET follow_account_id=(SELECT follow_account_id FROM robot_outbox WHERE id=outbox_id),bot_id=(SELECT bot_id FROM robot_outbox WHERE id=outbox_id) WHERE follow_account_id IS NULL')
   first=not c.execute("SELECT 1 FROM member_finance_migrations WHERE name='initial-members-v1'").fetchone()
@@ -196,7 +198,7 @@ def users(service,q,user=None):
   EXISTS(SELECT 1 FROM web_totp_credentials mfa WHERE mfa.user_id=u.id) AS mfa_bound,
   COALESCE(a.principal,0) principal,COALESCE(a.balance,0) balance,
  (SELECT COALESCE(SUM(pnl),0) FROM member_orders o WHERE o.user_id=u.id AND o.status='settled') profit,
- (SELECT COUNT(*) FROM member_orders o WHERE o.user_id=u.id AND o.status!='void') follow_count
+ (SELECT COUNT(*) FROM member_robot_orders o WHERE o.user_id=u.id AND o.status!='void') follow_count
  FROM web_users u LEFT JOIN member_accounts a ON a.user_id=u.id WHERE '''+where+' ORDER BY u.id DESC LIMIT ? OFFSET ?',(*args,size,(page-1)*size))
  for r in rows:r['roi']=r['profit']/r['principal'] if r['principal'] else None
  return {'rows':rows,'total':total,'page':page,'pages':pages,'page_size':size}
@@ -256,16 +258,21 @@ def listing(service,q,ledger=False,user=None):
    where.append('o.target_draw=?');args.append(int(q['draw']))
   if q.get('direction'):
    if q['direction'] not in ORDER_DIRECTION_AXES:raise ValueError('订单类型无效')
-   where.append('o.direction=?');args.append(q['direction'])
+   where.append('EXISTS(SELECT 1 FROM member_order_items d WHERE d.user_id=o.user_id AND d.order_key=o.order_key AND d.direction=?)');args.append(q['direction'])
   if q.get('status'):
    if q['status'] not in ('pending','awaiting_result','settled','void'):raise ValueError('订单状态无效')
    where.append('o.status=?');args.append(q['status'])
  if q.get('start') and q.get('end') and time_filter(q['start'])>time_filter(q['end']):raise ValueError('开始时间不能晚于结束时间')
- table='member_cash_ledger' if ledger else 'member_orders';source=table+' o JOIN web_users u ON u.id=o.user_id';condition=' AND '.join(where)
- total=service.db.query('SELECT COUNT(*) n FROM '+source+' WHERE '+condition,args)[0]['n'];pages=max(1,(total+size-1)//size);page=min(page,pages)
+ table='member_cash_ledger' if ledger else 'member_robot_orders';source=table+' o JOIN web_users u ON u.id=o.user_id';condition=' AND '.join(where)
  columns='o.*,u.username'
- if ledger:columns+=",(SELECT username FROM web_users actor WHERE actor.id=o.actor) actor_name"
- else:columns+=",(SELECT before_balance FROM member_cash_ledger l WHERE l.order_id=o.id AND l.kind='stake') before_balance,(SELECT after_balance FROM member_cash_ledger l WHERE l.order_id=o.id AND l.kind='stake') after_stake_balance,(SELECT after_balance FROM member_cash_ledger l WHERE l.order_id=o.id AND l.kind='settle') after_settle_balance,(SELECT before_balance FROM member_cash_ledger l WHERE l.order_id=o.id AND l.kind='settle') before_settle_balance,(SELECT amount FROM member_cash_ledger l WHERE l.order_id=o.id AND l.kind='settle') settlement_credit,(SELECT a FROM draws d WHERE d.id=o.target_draw) draw_a,(SELECT b FROM draws d WHERE d.id=o.target_draw) draw_b,(SELECT c FROM draws d WHERE d.id=o.target_draw) draw_c"
- rows=service.db.query('SELECT '+columns+' FROM '+source+' WHERE '+condition+' ORDER BY o.id DESC LIMIT ? OFFSET ?',(*args,size,(page-1)*size))
+ if ledger:columns+=",(SELECT username FROM web_users actor WHERE actor.id=o.actor) actor_name,(SELECT MIN(d.id) FROM member_order_items item JOIN member_order_items d ON d.user_id=item.user_id AND d.order_key=item.order_key WHERE item.id=o.order_id AND item.user_id=o.user_id) merged_order_id"
+ from contextlib import closing
+ with closing(service.db.connect()) as c:
+  c.execute('BEGIN')
+  total=c.execute('SELECT COUNT(*) FROM '+source+' WHERE '+condition,args).fetchone()[0];pages=max(1,(total+size-1)//size);page=min(page,pages)
+  rows=[dict(r) for r in c.execute('SELECT '+columns+' FROM '+source+' WHERE '+condition+' ORDER BY o.id DESC LIMIT ? OFFSET ?',(*args,size,(page-1)*size))]
+  if not ledger:
+   from .member_order_groups import hydrate
+   rows=[hydrate(c,r) for r in rows]
  for r in rows:r.pop('odds_json',None)
  return {'rows':rows,'total':total,'page':page,'pages':pages,'page_size':size}

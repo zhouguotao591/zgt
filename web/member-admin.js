@@ -12,18 +12,23 @@
   const d=await api('/api/admin/member-'+(kind==='orders'?'orders':'ledger')+'?'+q);
   el(kind+'-error').textContent='';pager(kind,d);
   if(kind==='orders')table('mf-orders-table',[
-   ['会员','username'],['期号','target_draw'],['发送时间（北京时间）',r=>date(r.placed_at)],
-   ['实际跟单数据',r=>`<strong class="mf-bet">${r.outcome==='offset'?'已全额对冲':esc(r.direction)+' '+money(r.stake)+' U'}</strong>${r.original_stake!=null&&r.original_stake!==r.stake?`<small class="mf-order-sub">策略原单 ${esc(r.original_message)} · 对冲 ${money(r.original_stake-r.stake)} U</small>`:''}`],
+   ['会员','username'],['下单账号 / 机器人',r=>esc(r.account_name)+' / '+esc(r.bot_name)],['期号','target_draw'],['发送时间（北京时间）',r=>date(r.placed_at)],
+   ['合并跟单数据',r=>`<strong class="mf-bet">${r.outcome==='offset'?'已全额对冲':esc(r.message)+' U'}</strong><small class="mf-order-sub">合计 ${money(r.stake)} U · ${r.detail_count}项明细</small>${r.original_stake!=null&&r.original_stake!==r.stake?`<small class="mf-order-sub">策略原单 ${esc(r.original_message)} · 对冲 ${money(r.original_stake-r.stake)} U</small>`:''}`],
    ['本期开奖结果',r=>r.total==null?'待开奖':`<strong>${[r.draw_a,r.draw_b,r.draw_c].every(v=>v!=null)&&r.draw_a+r.draw_b+r.draw_c===r.total?esc([r.draw_a,r.draw_b,r.draw_c].join('+'))+' = ':''}${r.total}</strong><small class="mf-order-sub">${esc(r.result||'')}</small>`],
    ['盈亏（U）',r=>r.pnl==null?'—':cash(r.pnl/100)],
-   ['余额变化（U）',r=>r.outcome==='offset'?'无资金变化':`<div class="mf-balance-line"><span>下注扣款</span> ${money(r.before_balance)} → ${money(r.after_stake_balance)}</div><div class="mf-balance-line"><span>结算返还</span> ${r.before_settle_balance==null?'待结算':money(r.before_settle_balance)+' → '+money(r.after_settle_balance)}</div>`],
-   ['结果',r=>r.outcome==='offset'?'已对冲，无资金变化':r.status==='pending'?'待开奖':outcome[r.outcome]||status[r.status]],
+   ['资金变化（U）',r=>r.outcome==='offset'?'无资金变化':`<div class="mf-balance-line"><span>合计扣款</span> ${money(r.debit)}</div><div class="mf-balance-line"><span>已返还</span> ${money(r.settlement_credit)}</div>`],
+   ['结果',r=>r.outcome==='offset'?'已对冲，无资金变化':r.outcome==='flat'?'持平':r.status==='pending'?'待开奖':outcome[r.outcome]||status[r.status]],
    ['明细',r=>`<button class="secondary" data-mf-order="${r.id}">查看</button>`]
   ],d.rows);
   else table('mf-ledger-table',[
-   ['时间（北京时间）',r=>date(r.created)],['会员','username'],['类型',r=>({opening:'历史会员初始化',adjust:'人工额度调整',stake:'跟单扣款',settle:'开奖结算',execution_reversal:'执行异常冲正'})[r.kind]||esc(r.kind)],['变动金额',r=>cash(r.amount/100)],['变动前余额',r=>money(r.before_balance)],['变动后余额',r=>money(r.after_balance)],['调整前本金',r=>money(r.principal_before)],['调整后本金',r=>money(r.principal_after)],['操作者',r=>esc(r.actor_name||'系统')],['订单编号',r=>r.order_id??'—'],['备注','note']
+   ['时间（北京时间）',r=>date(r.created)],['会员','username'],['类型',r=>({opening:'历史会员初始化',adjust:'人工额度调整',stake:'跟单扣款',settle:'开奖结算',execution_reversal:'执行异常冲正'})[r.kind]||esc(r.kind)],['变动金额',r=>cash(r.amount/100)],['变动前余额',r=>money(r.before_balance)],['变动后余额',r=>money(r.after_balance)],['调整前本金',r=>money(r.principal_before)],['调整后本金',r=>money(r.principal_after)],['操作者',r=>esc(r.actor_name||'系统')],['订单编号',r=>r.merged_order_id?`#${r.merged_order_id}<small class="mf-order-sub">明细 #${r.order_id}</small>`:r.order_id??'—'],['备注','note']
   ],d.rows);
- if(kind==='orders')document.querySelectorAll('[data-mf-order]').forEach(b=>b.onclick=()=>{const r=d.rows.find(x=>x.id===Number(b.dataset.mfOrder));el('detail-content').textContent=['会员：'+r.username,'期号：'+r.target_draw,'发送时间（北京时间）：'+beijingTime(r.placed_at),'接收时间（北京时间）：'+beijingTime(r.accepted_at),'开奖时间（北京时间）：'+beijingTime(r.draw_time),'结算时间（北京时间）：'+beijingTime(r.settled_at),'实际跟单：'+r.direction+' '+money(r.stake)+' U','策略：'+r.strategy_name,'合并编号：'+(r.batch_id||'—'),'本期开奖结果：'+(r.total==null?'待开奖':r.total+' '+r.result),'盈亏：'+money(r.pnl)+' U','下注扣款：'+money(r.before_balance)+' → '+money(r.after_stake_balance),'结算返还：'+money(r.before_settle_balance)+' → '+money(r.after_settle_balance)].join('\n');el('detail-dialog').showModal();});
+ if(kind==='orders')document.querySelectorAll('[data-mf-order]').forEach(b=>b.onclick=()=>{
+  const r=d.rows.find(x=>x.id===Number(b.dataset.mfOrder));
+  const lines=['会员：'+r.username,'下单账号：'+r.account_name,'机器人：'+r.bot_name,'期号：'+r.target_draw,'发送时间（北京时间）：'+beijingTime(r.placed_at),'接收时间（北京时间）：'+beijingTime(r.accepted_at),'开奖时间（北京时间）：'+beijingTime(r.draw_time),'结算时间（北京时间）：'+beijingTime(r.settled_at),'合并下单：'+r.message,'下单合计：'+money(r.stake)+' U','合计扣款：'+money(r.debit)+' U','合计返还：'+money(r.settlement_credit)+' U','策略：'+r.strategy_name,'合并编号：'+(r.batch_id||'—'),'本期开奖结果：'+(r.total==null?'待开奖':r.total+' '+r.result),'合计盈亏：'+money(r.pnl)+' U','扣款余额区间：'+money(r.before_balance)+' → '+money(r.after_stake_balance),'返还余额区间：'+money(r.before_settle_balance)+' → '+money(r.after_settle_balance),'余额区间可能包含其他机器人订单或人工资金调整，以逐笔资金流水为准。','策略及下单类型明细：'];
+  for(const item of r.items||[])lines.push('#'+item.id+' · '+(item.strategy_name||'历史策略')+' · '+item.direction+' '+money(item.stake)+' U · '+(status[item.status]||item.status)+' · 盈亏 '+money(item.pnl)+' U');
+  el('detail-content').textContent=lines.join('\n');el('detail-dialog').showModal();
+ });
  }catch(e){el(kind+'-error').textContent=e.message;}finally{s.busy=false;}}
  document.querySelectorAll('[data-mf-page]').forEach(b=>b.onclick=()=>{const s=state[b.dataset.mfPage];s.page=({first:1,prev:Math.max(1,s.page-1),next:Math.min(s.pages,s.page+1),last:s.pages})[b.dataset.move];load(b.dataset.mfPage);});
  for(const kind of ['orders','ledger'])el(kind+'-size').onchange=()=>{state[kind].page=1;load(kind);};
