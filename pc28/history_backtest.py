@@ -34,6 +34,9 @@ def selection(service,key):
  if kind in ('algorithm','algorithm_rank'):snapshot['hidden_algorithms']=sorted(service.algorithm_hall.hidden())
  return snapshot
 def prepare(service,args):
+ args=dict(args) if isinstance(args,dict) else args
+ hourly=args.pop('hourly',False) if isinstance(args,dict) else False
+ if type(hourly)!=bool:raise ValueError('小时分析参数无效')
  if not isinstance(args,dict) or 'strategy_id' not in args or set(args)-{'strategy_id','range_mode','start','end','periods','trend_risk'}:raise ValueError('回测参数无效')
  args=dict(args);risk_rule=args.pop('trend_risk',None)
  if risk_rule is not None:
@@ -58,7 +61,7 @@ def prepare(service,args):
  with service.lock:
   snap=selection(service,args['strategy_id']);snap['maintenance_guard']=service.cfg['collector'].get('maintenance_guard_enabled',True);last=service.db.query('SELECT MAX(id) id FROM draws')[0]['id']
   if last is None:raise ValueError('本地没有开奖记录')
- return {'snapshot':snap,'cutoff_id':last,'as_of':utcnow(),'range':spec,'trend_risk':risk_rule}
+ return {'snapshot':snap,'cutoff_id':last,'as_of':utcnow(),'range':spec,'trend_risk':risk_rule,'hourly':hourly}
 def three_months_before(value,months=3):
  month=value.year*12+value.month-1-months;year,m=divmod(month,12);m+=1
  return value.replace(year=year,month=m,day=min(value.day,calendar.monthrange(year,m)[1]))
@@ -252,6 +255,15 @@ def execute(service,prepared,on_progress=None):
   c.execute('BEGIN');raw=[dict(r) for r in c.execute('SELECT * FROM draws WHERE id<=? ORDER BY id',(cutoff,))];conflicts={r[0] for r in c.execute('SELECT draw_id FROM conflicts WHERE resolved=0')}
  spec=prepared.get('range',{'mode':'three_months'});custom=spec['mode']!='three_months'
  rows,coverage=source_window(raw,conflicts,prepared['as_of'],range_spec=spec)
+ cache_key=None
+ if prepared.get('hourly'):
+  import hashlib
+  snapshot={k:v for k,v in snap.items() if k!='snapshot_at'}
+  cache_key=hashlib.sha256(json.dumps([snapshot,spec,coverage,prepared.get('trend_risk')],sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+  for saved in service.db.query('SELECT result FROM history_backtest_runs ORDER BY created DESC LIMIT 100'):
+   cached=json.loads(saved['result'])
+   if cached.get('hourly_cache_key')==cache_key:return cached
+  custom=True
  month_rows,month_coverage=([],{}) if custom else source_window(raw,conflicts,prepared['as_of'],months=1)
  total=len(rows)+len(month_rows)
  result,orders=replay(rows,snap,(lambda n,t:on_progress(n,total)) if on_progress else None)
@@ -270,6 +282,7 @@ def execute(service,prepared,on_progress=None):
   result['amount_counting']='cumulative-v2'
   result['notes'].append('加额与减额分别按已结算订单累计，输赢交替和退本金不清零；任一项达到上限后下一单恢复基础金额，两项同时重新计数。')
  result['range']=spec
+ if cache_key:result['hourly_cache_key']=cache_key
  if snap['kind']=='previous' and snap['settings'].get('previous_types') is not None:result['notes'].append('同一策略内各下单类型独立计算金额与加减额，共用本金和整体资金风控；同一期可有多笔订单。未下单期数按去重期开奖统计，跳过原因按类型分别计数。')
  result['notes'][0]='仅使用本次所选范围的本地有效开奖记录；单次20—100000期，预热不读取范围外数据。'
  folder=service.root/'data/exports';folder.mkdir(parents=True,exist_ok=True)

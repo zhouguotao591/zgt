@@ -23,3 +23,57 @@ window.pc28OpenBacktest=async (strategyId,riskRule)=>{if(taskId&&el('hb-strategy
 document.querySelector('[data-tab="history-backtest"]').addEventListener('click',()=>loadMeta(true));})();
 
 window.pc28HistoryReady=true;
+
+// Hourly analysis shares the isolated replay worker, never the live account.
+(()=>{
+ const dialog=document.createElement('dialog');dialog.className='history-backtest-dialog';
+ dialog.innerHTML=`<header class="backtest-modal-header"><h2 id="sh-title">策略小时胜率</h2><button type="button" aria-label="关闭小时胜率">×</button></header><div class="backtest-modal-body"><form id="sh-form" class="formgrid"><label>分析范围<select id="sh-range"><option value="30">最近30天</option><option value="7">最近7天</option><option value="custom">自定义时间</option></select></label><label>开始时间（北京）<input id="sh-start" type="datetime-local" required></label><label>结束时间（北京）<input id="sh-end" type="datetime-local" required></label><button id="sh-run">开始分析</button></form><p id="sh-status" role="status" aria-live="polite"></p><p class="muted">按当前已保存参数连续回放，跨小时不重置轮次和风控。盈利胜率＝盈利笔数÷全部已结算笔数，退本单独列示。多类型按独立下注笔数统计；少于30笔标记样本较少。</p><div id="sh-output" hidden><div class="formgrid"><label>查看方式<select id="sh-mode"><option value="hours">逐小时明细</option><option value="clock">24小时汇总</option></select></label><label>下单类型<select id="sh-type"><option value="">全部类型</option></select></label></div><p id="sh-scope"></p><details><summary>参数快照与计算说明</summary><pre id="sh-snapshot" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details><div id="sh-table" class="table-wrap" style="max-height:48vh;overflow:auto"></div><h3 id="sh-detail-title">点击小时查看下单明细</h3><div id="sh-orders" class="table-wrap"></div><div class="actions"><button type="button" id="sh-prev">上一页</button><span id="sh-page"></span><button type="button" id="sh-next">下一页</button></div></div></div>`;
+ document.body.append(dialog);const el=id=>dialog.querySelector('#sh-'+id);let strategy='',run='',task='',timer=null,slot='',page=1,pages=1,version=0;
+ const date=value=>new Date(value).toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}).replace(' ','T').slice(0,16);
+ const labels={size:'大小',parity:'单双',combo:'组合',a:'A球大小',b:'B球大小',c:'C球大小'};
+ const rate=v=>v==null?'—':(v*100).toFixed(2)+'%';
+ dialog.querySelector('header button').onclick=()=>dialog.close();
+ dialog.addEventListener('close',()=>{version++;clearTimeout(timer);});
+ async function load(){
+  const token=++version;el('status').textContent='正在读取小时统计…';
+  try{
+   const q=new URLSearchParams({id:run,hourly:'1',mode:el('mode').value,type:el('type').value,slot,page});
+   const d=await api('/api/history-backtest-result?'+q);if(token!==version||!dialog.open)return;
+   el('output').hidden=false;const r=d.result,c=r.coverage;
+   const selected=el('type').value;el('type').innerHTML='<option value="">全部类型</option>'+d.types.map(t=>`<option value="${esc(t)}">${esc(labels[t]||t)}</option>`).join('');el('type').value=selected;
+   el('scope').textContent=`北京时间 ${c.actual_start} 至 ${c.actual_end} · ${c.draws}期 · 缺期${c.missing_periods}期 · 生成于${beijingTime(r.created)} · 总净收益${num(r.net)} U（全部类型）`;
+   const skips=Object.entries(r.skips||{}).sort((a,b)=>b[1]-a[1]).slice(0,3);
+   if(skips.length)el('scope').textContent+=' · 主要未下单原因：'+skips.map(([k,v])=>k+' '+v+'次').join('；');
+   el('snapshot').textContent=JSON.stringify({strategy:r.strategy,coverage:c,notes:r.notes},null,2);
+   const clock=el('mode').value==='clock';
+   table('sh-table',[['时间（北京）',b=>`<button type="button" class="secondary" data-sh-slot="${esc(b.key)}">${esc(clock?b.key.padStart(2,'0')+':00—'+String((Number(b.key)+1)%24).padStart(2,'0')+':00':b.key.slice(0,16).replace('T',' '))}</button>`],['下注',b=>b.bets||'无下注'],['盈利','wins'],['亏损','losses'],['退本','refunds'],['盈利胜率',b=>rate(b.win_rate)],['方向命中率',b=>rate(b.hit_rate)],['投入（U）',b=>num(b.stake)],['净收益（U）',b=>cash(b.pnl)],['投入收益率',b=>rate(b.roi)],['样本',b=>b.low_sample?'样本较少':'—']],clock?d.clock:d.hours);
+   table('sh-orders',[['期号','target_draw'],['开奖时间（北京）','beijing_time'],['方向','direction'],['金额（U）',o=>num(o.stake/100)],['结果',o=>({win:'盈利',loss:'亏损',refund:'退本'}[o.outcome]||o.outcome)],['净收益（U）',o=>cash(o.pnl/100)],['轮次 / 第几笔',o=>o.cycle+' / '+o.step]],d.orders);
+   page=d.page;pages=d.pages;el('page').textContent=slot?`第${page}/${pages}页 · ${d.total}笔`:'';el('prev').disabled=!slot||page<=1;el('next').disabled=!slot||page>=pages;
+   el('detail-title').textContent=slot?'所选小时下单明细':'点击小时查看下单明细';el('status').textContent='分析完成；结果为历史回放，不代表未来收益。';
+  }catch(e){if(token===version)el('status').textContent='读取失败：'+e.message;}
+ }
+ async function poll(){
+  if(!dialog.open||!task)return;
+  const currentTask=task;
+  try{const d=await api('/api/history-backtest-task?id='+encodeURIComponent(task));if(!dialog.open||task!==currentTask)return;
+   if(d.status==='done'){run=d.result.run_id;task='';el('run').disabled=false;slot='';page=1;await load();return;}
+   if(d.status==='error')throw Error(d.error||'分析失败');el('status').textContent=d.status==='queued'?'分析已排队':d.progress||'正在连续回放历史开奖…';timer=setTimeout(poll,1500);
+  }catch(e){if(!dialog.open||task!==currentTask)return;el('status').textContent=e.message;if(e.transient){timer=setTimeout(poll,2500);}else{task='';el('run').disabled=false;}}
+ }
+ el('form').onsubmit=async e=>{e.preventDefault();if(task)return;el('run').disabled=true;el('output').hidden=true;el('status').textContent='正在提交分析…';
+  const token=version;
+  try{const d=await api('/api/task',{kind:'history_backtest',args:{strategy_id:strategy,range_mode:'dates',start:el('start').value,end:el('end').value,hourly:true}});if(token!==version||!dialog.open)return;task=d.task_id;poll();}
+  catch(e){el('run').disabled=false;el('status').textContent='提交失败：'+e.message;}
+ };
+ el('range').onchange=()=>{if(el('range').value!=='custom'){const end=new Date(el('end').value+'+08:00');el('start').value=date(new Date(end.getTime()-Number(el('range').value)*86400000));}};
+ for(const name of ['start','end'])el(name).onchange=()=>{el('range').value='custom';};
+ for(const name of ['mode','type'])el(name).onchange=()=>{slot='';page=1;if(run)load();};
+ el('table').onclick=e=>{const b=e.target.closest('[data-sh-slot]');if(b){slot=b.dataset.shSlot;page=1;load();}};
+ el('prev').onclick=()=>{page--;load();};el('next').onclick=()=>{page++;load();};
+ document.getElementById('strategy-catalog').addEventListener('click',async e=>{
+  const b=e.target.closest('[data-strategy-hourly]');if(!b)return;
+  clearTimeout(timer);version++;strategy=b.dataset.strategyHourly;run='';task='';slot='';el('run').disabled=false;el('output').hidden=true;el('type').innerHTML='<option value="">全部类型</option>';el('title').textContent='策略小时胜率';dialog.showModal();el('status').textContent='正在读取策略及历史范围…';
+  try{const d=await api('/api/history-backtests');if(!dialog.open)return;const s=d.strategies.find(s=>s.id===strategy);el('title').textContent=(s?.name||strategy)+' · 策略小时胜率';const end=d.available?.end||d.scope?.end;if(!end)throw Error('本地暂无有效开奖数据');el('end').value=date(end);el('range').value='30';el('range').onchange();el('status').textContent='已选择最近30天，点击开始分析；相同参数与历史数据会复用缓存结果。';}
+  catch(e){el('status').textContent=e.message;el('run').disabled=true;}
+ });
+})();

@@ -172,6 +172,10 @@ class Handler(BaseHTTPRequestHandler):
     with s.lock:result=metadata(s)
     self.send(200,result);return
    if p.path=='/api/history-backtest-result':
+    q=parse_qs(p.query)
+    if q.get('hourly',[''])[0]=='1':
+     from .strategy_hourly import page
+     self.send(200,page(s.db,q.get('id',[''])[0],q.get('mode',['hours'])[0],q.get('slot',[''])[0],q.get('type',[''])[0],q.get('page',['1'])[0]));return
     from .history_backtest import result_page
     q=parse_qs(p.query);self.send(200,result_page(s.db,q.get('id',[''])[0],q.get('page',['1'])[0],q.get('page_size',['20'])[0],q.get('interval',['1h'])[0]));return
    if p.path=='/api/history-backtest-task':

@@ -52,13 +52,16 @@ class Service:
   if kind=='history_backtest':
    from .history_backtest import prepare
    args=prepare(self,args or {})
+   import hashlib
+   request=dict(args);request.pop('as_of',None);request['snapshot']={k:v for k,v in request['snapshot'].items() if k!='snapshot_at'}
+   request_key=hashlib.sha256(json.dumps(request,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
   with self.task_lock:
    if kind=='history_backtest':
-    existing=next((t for t in self.tasks.values() if t['kind']==kind and t.get('strategy_id')==args['snapshot']['id'] and t['status'] in ('queued','running')),None)
+    existing=next((t for t in self.tasks.values() if t['kind']==kind and t.get('request_key')==request_key and t['status'] in ('queued','running')),None)
     if existing:return existing['id']
    if len([x for x in self.tasks.values() if x['status'] in ('queued','running')])>=10:raise ValueError('任务队列已满')
    self.counter+=1;key=str(self.counter);self.tasks[key]={'id':key,'kind':kind,'status':'queued','created':utcnow(),'progress':''}
-   if kind=='history_backtest':self.tasks[key]['strategy_id']=args['snapshot']['id']
+   if kind=='history_backtest':self.tasks[key].update(strategy_id=args['snapshot']['id'],request_key=request_key)
    (self.collect_q if kind in ('collect','archive','sync','repair_raw','repair_pending') else self.q).put((key,kind,args or {}));return key
  def _worker(self,work_queue=None):
   work_queue=work_queue if work_queue is not None else self.q
